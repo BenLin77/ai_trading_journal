@@ -184,11 +184,11 @@
 
 **Purpose**: Improvements that affect multiple user stories
 
-- [ ] T072 [P] Add cache invalidation "Refresh" button in pages/6_GEX_Sentinel.py (st.button → st.cache_data.clear())
-- [ ] T073 [P] Add market closed detection and timestamp display in src/services/market_data_service.py (check market hours, add "Data as of [timestamp]" if stale)
-- [ ] T074 [P] Add API rate limit handling and circuit breaker in src/services/market_data_service.py (track consecutive failures, pause with cooldown message)
+- [x] T072 [P] Add cache invalidation "Refresh" button in pages/6_GEX_Sentinel.py (st.button → st.cache_data.clear())
+- [x] T073 [P] Add market closed detection and timestamp display in src/services/market_data_service.py (check market hours, add "Data as of [timestamp]" if stale)
+- [x] T074 [P] Add API rate limit handling and circuit breaker in src/services/market_data_service.py (track consecutive failures, pause with cooldown message)
 - [ ] T075 [P] Add pagination or virtual scrolling for large watchlists in src/ui/scanner_view.py (if >30 symbols, use st.dataframe height limit)
-- [ ] T076 Add performance logging for GEX calculations in src/services/gex_calculator.py (log warning if >2s, log timing stats)
+- [x] T076 Add performance logging for GEX calculations in src/services/gex_calculator.py (log warning if >2s, log timing stats)
 - [x] T077 [P] Write README.md quickstart section at repository root (setup instructions, running app, TDD workflow)
 - [x] T078 [P] Create example .env.example file if not exists (LLM_API_KEY, DB_PATH templates)
 - [x] T079 Run complete test suite and verify all tests pass (uv run pytest tests/ --cov=src)

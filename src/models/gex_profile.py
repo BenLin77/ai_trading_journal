@@ -1,8 +1,8 @@
 """
-GEX Profile and Market Snapshot data models.
+GEX Profile 和 Market Snapshot 資料模型。
 
-Calculated market structure metrics per data-model.md Sections 2-3.
-These are ephemeral (derived, not persisted).
+根據 data-model.md 第 2-3 節計算的市場結構指標。
+這些是暫時性的 (衍生，不持久化)。
 """
 
 from dataclasses import dataclass
@@ -13,21 +13,21 @@ from typing import Optional
 @dataclass
 class GEXProfile:
     """
-    Calculated market structure snapshot for a single symbol (derived, not persisted).
+    單一股票的市場結構快照 (衍生，不持久化)。
 
     Attributes:
-        symbol: Stock ticker
-        net_gex: Net gamma exposure in dollars (calls - puts)
-        gex_state: "Bullish" (net_gex > 0), "Bearish" (net_gex < 0), or "Neutral" (net_gex == 0)
-        call_wall: Strike with highest call open interest
-        put_wall: Strike with highest put open interest
-        max_pain: Strike with minimum total intrinsic value
-        timestamp: When calculation was performed
+        symbol: 股票代碼
+        net_gex: 淨 Gamma 曝險金額 (calls - puts)
+        gex_state: "Bullish" (net_gex > 0), "Bearish" (net_gex < 0), 或 "Neutral" (net_gex == 0)
+        call_wall: 具有最高 Call 未平倉合約的履約價
+        put_wall: 具有最高 Put 未平倉合約的履約價
+        max_pain: 具有最小總內在價值的履約價
+        timestamp: 執行計算的時間
 
     Validation Rules:
-    - gex_state derived from sign of net_gex
-    - call_wall and put_wall must be valid strikes from options chain
-    - max_pain must be within active strike range
+    - gex_state 衍生自 net_gex 的符號
+    - call_wall 和 put_wall 必須是選擇權鏈中的有效履約價
+    - max_pain 必須在活躍履約價範圍內
 
     Derivation Logic (from research.md):
         net_gex = sum(call_gex_per_strike) - sum(put_gex_per_strike)
@@ -49,18 +49,18 @@ class GEXProfile:
 @dataclass
 class MarketSnapshot:
     """
-    Current price and change data for a symbol (derived, not persisted).
+    單一股票的當前價格和變動數據 (衍生，不持久化)。
 
     Attributes:
-        symbol: Stock ticker
-        current_price: Latest trade price
-        previous_close: Prior session close
-        change_pct: Percentage change (current - prev) / prev
-        timestamp: When data was fetched
+        symbol: 股票代碼
+        current_price: 最新成交價
+        previous_close: 前一交易日收盤價
+        change_pct: 變動百分比 (current - prev) / prev
+        timestamp: 獲取數據的時間
 
     Validation Rules:
     - change_pct = (current_price - previous_close) / previous_close * 100
-    - current_price and previous_close must be positive
+    - current_price 和 previous_close 必須為正數
     """
 
     symbol: str

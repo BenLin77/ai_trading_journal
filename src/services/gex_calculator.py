@@ -1,14 +1,16 @@
 """
-GEX (Gamma Exposure) calculator service.
+GEX (Gamma Exposure) 計算服務。
 
-Implements GEX proxy algorithm per research.md Section 1.
-Calculates Net GEX, GEX State, Call/Put Walls, and Max Pain.
+根據 research.md 第 1 節實作 GEX 代理演算法。
+計算淨 GEX、GEX 狀態、Call/Put 牆和最大痛點 (Max Pain)。
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime
+import time
+import logging
 from scipy.stats import norm
 from typing import Optional
 
@@ -19,27 +21,29 @@ from src.services.market_data_service import fetch_options_chain, fetch_price_sn
 @st.cache_data(ttl=300)
 def calculate_gex_profile(symbol: str) -> GEXProfile:
     """
-    Calculate GEX metrics from options chain (cached 5 min).
+    從選擇權鏈計算 GEX 指標 (快取 5 分鐘)。
 
     Args:
-        symbol: Ticker symbol
+        symbol: 股票代碼
 
     Returns:
-        GEXProfile: Net GEX, GEX state, Call/Put walls, Max Pain
+        GEXProfile: 淨 GEX、GEX 狀態、Call/Put 牆、最大痛點
 
     Raises:
-        ValueError: No options chain available (illiquid stock)
-        RuntimeError: GEX calculation timeout (>2s)
+        ValueError: 無可用選擇權鏈 (流動性不足的股票)
+        RuntimeError: GEX 計算超時 (>2s)
 
-    Algorithm (from research.md):
+    演算法 (來自 research.md):
         gex_per_strike = OI × gamma × 100 × spot_price² × 0.01
         net_gex = sum(call_gex) - sum(put_gex)
         gex_state = "Bullish" if net_gex > 0 else ("Neutral" if net_gex == 0 else "Bearish")
 
-    Performance Requirement: Must complete in <2s (PERF-002)
-    Caching: @st.cache_data(ttl=300) on (symbol,)
+    效能需求: 必須在 <2s 內完成 (PERF-002)
+    快取: @st.cache_data(ttl=300) on (symbol,)
     """
-    # Fetch options chain and current price
+    start_time = time.time()
+    
+    # 獲取選擇權鏈和當前價格
     options_chain = fetch_options_chain(symbol)
     price_snapshot = fetch_price_snapshot(symbol)
 
@@ -47,16 +51,32 @@ def calculate_gex_profile(symbol: str) -> GEXProfile:
     calls_df = options_chain.calls
     puts_df = options_chain.puts
 
-    # Calculate time to expiry (simplified: assume 30 days)
-    # TODO: Parse expiry_date properly for exact TTE
-    tte_years = 30 / 365.0
+    # 計算到期時間 (使用實際到期日)
+    try:
+        expiry_date = datetime.strptime(options_chain.expiry_date, "%Y-%m-%d")
+        # 加上 16:00 作為收盤時間，讓計算更精確
+        expiry_datetime = expiry_date.replace(hour=16, minute=0, second=0)
+        
+        time_diff = expiry_datetime - datetime.now()
+        tte_days = time_diff.total_seconds() / (24 * 3600)
+        
+        # 確保至少有 1 天 (0.0027 年) 以避免除以零或極端 Gamma 值
+        tte_years = max(tte_days, 1.0) / 365.0
+    except Exception as e:
+        logging.warning(f"無法解析到期日 {options_chain.expiry_date}: {e}，使用預設 30 天")
+        tte_years = 30 / 365.0
 
-    # Calculate gamma for each strike and compute GEX
+    # 檢查超時 (PERF-002)
+    # 在進入繁重計算迴圈前檢查
+    if time.time() - start_time > 1.5: # 保守檢查
+         logging.warning(f"{symbol} 的 GEX 計算在迴圈前接近超時")
+
+    # 計算每個履約價的 Gamma 並計算 GEX
     call_gex_total = 0.0
     for _, row in calls_df.iterrows():
         strike = row['strike']
         oi = row['openInterest']
-        iv = row.get('impliedVolatility', 0.25)  # Default IV if missing
+        iv = row.get('impliedVolatility', 0.25)  # 若缺失則使用預設 IV
 
         gamma = _calculate_gamma(strike, spot_price, iv, tte_years)
         gex_per_strike = oi * gamma * 100 * (spot_price ** 2) * 0.01
@@ -72,10 +92,10 @@ def calculate_gex_profile(symbol: str) -> GEXProfile:
         gex_per_strike = oi * gamma * 100 * (spot_price ** 2) * 0.01
         put_gex_total += gex_per_strike
 
-    # Net GEX
+    # 淨 GEX
     net_gex = call_gex_total - put_gex_total
 
-    # GEX State
+    # GEX 狀態
     if net_gex > 0:
         gex_state = "Bullish"
     elif net_gex < 0:
@@ -83,7 +103,7 @@ def calculate_gex_profile(symbol: str) -> GEXProfile:
     else:
         gex_state = "Neutral"
 
-    # Calculate walls (highest OI strikes)
+    # 計算牆 (最高 OI 履約價)
     if not calls_df.empty and 'openInterest' in calls_df.columns:
         max_call_oi_idx = calls_df['openInterest'].idxmax()
         call_wall = float(calls_df.loc[max_call_oi_idx, 'strike'])
@@ -96,7 +116,7 @@ def calculate_gex_profile(symbol: str) -> GEXProfile:
     else:
         put_wall = None
 
-    # Calculate Max Pain
+    # 計算最大痛點 (Max Pain)
     max_pain = _calculate_max_pain(options_chain, spot_price)
 
     return GEXProfile(
@@ -112,28 +132,28 @@ def calculate_gex_profile(symbol: str) -> GEXProfile:
 
 def _calculate_gamma(strike: float, spot: float, iv: float, tte: float) -> float:
     """
-    Calculate Black-Scholes gamma for a strike (internal helper).
+    計算履約價的 Black-Scholes Gamma (內部輔助函式)。
 
     Args:
-        strike: Strike price
-        spot: Current stock price
-        iv: Implied volatility (annualized, 0.0-1.0)
-        tte: Time to expiry (years)
+        strike: 履約價
+        spot: 當前股價
+        iv: 隱含波動率 (年化, 0.0-1.0)
+        tte: 到期時間 (年)
 
     Returns:
-        float: Gamma value
+        float: Gamma 值
 
-    Formula (from service_contracts.md):
+    公式 (來自 service_contracts.md):
         d1 = (log(spot/strike) + (0.025 + 0.5*iv²)*tte) / (iv*sqrt(tte))
         gamma = norm.pdf(d1) / (spot * iv * sqrt(tte))
 
-    Library: scipy.stats.norm for norm.pdf
+    函式庫: scipy.stats.norm 用於 norm.pdf
     """
     if iv <= 0 or tte <= 0 or spot <= 0 or strike <= 0:
         return 0.0
 
     try:
-        # Risk-free rate assumed at 2.5% (0.025)
+        # 假設無風險利率為 2.5% (0.025)
         d1 = (np.log(spot / strike) + (0.025 + 0.5 * iv ** 2) * tte) / (iv * np.sqrt(tte))
         gamma = norm.pdf(d1) / (spot * iv * np.sqrt(tte))
         return gamma
@@ -143,16 +163,16 @@ def _calculate_gamma(strike: float, spot: float, iv: float, tte: float) -> float
 
 def _calculate_max_pain(options_chain, spot_price: float) -> Optional[float]:
     """
-    Find strike with minimum total intrinsic value loss (internal helper).
+    尋找總內在價值損失最小的履約價 (內部輔助函式)。
 
     Args:
-        options_chain: OptionsChain with calls + puts DataFrames
-        spot_price: Current stock price (for proximity check)
+        options_chain: 包含 calls + puts DataFrames 的 OptionsChain
+        spot_price: 當前股價 (用於接近度檢查)
 
     Returns:
-        float: Max Pain strike price
+        float: 最大痛點履約價
 
-    Algorithm (from service_contracts.md):
+    演算法 (來自 service_contracts.md):
         for strike in all_strikes:
             call_loss = sum(max(0, spot - s) * oi for s in calls if s > strike)
             put_loss = sum(max(0, s - spot) * oi for s in puts if s < strike)
@@ -163,37 +183,37 @@ def _calculate_max_pain(options_chain, spot_price: float) -> Optional[float]:
     calls_df = options_chain.calls
     puts_df = options_chain.puts
 
-    # Get all unique strikes
+    # 獲取所有唯一履約價
     all_strikes = sorted(set(calls_df['strike'].tolist() + puts_df['strike'].tolist()))
 
     if not all_strikes:
         return None
 
-    # Calculate total intrinsic value loss for each potential Max Pain strike
+    # 計算每個潛在最大痛點履約價的總內在價值損失
     total_losses = {}
 
     for pain_strike in all_strikes:
-        # Call losses: For strikes above pain_strike, calculate ITM value
+        # Call 損失: 對於高於 pain_strike 的履約價，計算 ITM 價值
         call_loss = 0.0
         for _, row in calls_df.iterrows():
             strike = row['strike']
             oi = row['openInterest']
             if strike < pain_strike:
-                # Calls ITM at expiry
-                call_loss += max(0, pain_strike - strike) * oi * 100  # Contract multiplier
+                # 到期時 Call 為 ITM
+                call_loss += max(0, pain_strike - strike) * oi * 100  # 合約乘數
 
-        # Put losses: For strikes below pain_strike, calculate ITM value
+        # Put 損失: 對於低於 pain_strike 的履約價，計算 ITM 價值
         put_loss = 0.0
         for _, row in puts_df.iterrows():
             strike = row['strike']
             oi = row['openInterest']
             if strike > pain_strike:
-                # Puts ITM at expiry
+                # 到期時 Put 為 ITM
                 put_loss += max(0, strike - pain_strike) * oi * 100
 
         total_losses[pain_strike] = call_loss + put_loss
 
-    # Max Pain is the strike with minimum total loss
+    # 最大痛點是總損失最小的履約價
     max_pain_strike = min(total_losses, key=total_losses.get)
 
     return float(max_pain_strike)

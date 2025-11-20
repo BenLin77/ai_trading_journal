@@ -1,8 +1,8 @@
 """
-GEX Sentinel Watchlist Dashboard - Main Streamlit Page
+GEX Sentinel 觀察清單儀表板 - 主 Streamlit 頁面
 
-Feature: 001-gex-sentinel-watchlist
-User Stories: P1 (Watchlist Management), P2 (Scanner), P3 (Deep Dive), P4 (Categorization)
+功能: 001-gex-sentinel-watchlist
+使用者故事: P1 (觀察清單管理), P2 (掃描器), P3 (深入分析), P4 (分類)
 """
 
 import streamlit as st
@@ -20,7 +20,7 @@ from src.services.ai_service import generate_structure_analysis
 from src.models.gex_profile import GEXProfile, MarketSnapshot
 from src.models.sentiment import SentimentIndicators
 
-# Page configuration
+# 頁面配置
 st.set_page_config(
     page_title="GEX Sentinel | AI Trading Coach",
     page_icon="📊",
@@ -28,32 +28,32 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Initialize database on first run
+# 首次執行時初始化資料庫
 initialize_db()
 
-# Title
-st.title("📊 GEX Sentinel Watchlist Dashboard")
-st.caption("User-managed watchlist with batch GEX/Max Pain calculations and deep-dive structure analysis")
+# 標題
+st.title("📊 GEX Sentinel 觀察清單儀表板")
+st.caption("使用者管理的觀察清單，具備批次 GEX/Max Pain 計算與深入結構分析功能")
 
-# --- Sidebar Watchlist Management (User Story 1 - P1 MVP) ---
+# --- 側邊欄觀察清單管理 (使用者故事 1 - P1 MVP) ---
 def on_symbol_removed(symbol: str):
-    """Callback when symbol is removed - refresh main view"""
+    """當股票代碼被移除時的回呼函式 - 重新整理主畫面"""
     st.cache_data.clear()
     st.rerun()
 
 render_watchlist_management(on_symbol_removed=on_symbol_removed)
 
-# Add Refresh Button to Sidebar (T072)
+# 新增重新整理按鈕至側邊欄 (T072)
 st.sidebar.divider()
-if st.sidebar.button("🔄 Refresh Data", help="Clear cache and reload all data"):
+if st.sidebar.button("🔄 重新整理數據", help="清除快取並重新載入所有數據"):
     st.cache_data.clear()
     st.rerun()
 
-# --- Data Fetching & Processing ---
+# --- 數據獲取與處理 ---
 
 @st.cache_data(ttl=300)
 def fetch_symbol_data(symbol: str):
-    """Fetch all data for a single symbol with error handling."""
+    """獲取單一股票的所有數據，並包含錯誤處理。"""
     try:
         price_snap = fetch_price_snapshot(symbol)
         gex_prof = calculate_gex_profile(symbol)
@@ -71,25 +71,25 @@ def fetch_symbol_data(symbol: str):
         }
 
 def fetch_batch_data(watchlist):
-    """Fetch data for all symbols in watchlist with progress bar."""
+    """獲取觀察清單中所有股票的數據，並顯示進度條。"""
     results = {}
     if not watchlist:
         return results
         
-    progress_bar = st.progress(0, text="Initializing batch fetch...")
+    progress_bar = st.progress(0, text="正在初始化批次獲取...")
     
     for i, entry in enumerate(watchlist):
-        progress_bar.progress((i + 1) / len(watchlist), text=f"Analyzing {entry.symbol}...")
+        progress_bar.progress((i + 1) / len(watchlist), text=f"正在分析 {entry.symbol}...")
         results[entry.symbol] = fetch_symbol_data(entry.symbol)
     
     progress_bar.empty()
     return results
 
-# --- UI Components ---
+# --- UI 元件 ---
 
 def render_scanner_table(watchlist, data_map):
-    """Render User Story 2: Scanner Table View."""
-    st.subheader("📡 Market Scanner")
+    """渲染使用者故事 2: 掃描器表格視圖。"""
+    st.subheader("📡 市場掃描器")
     
     table_data = []
     for entry in watchlist:
@@ -101,7 +101,7 @@ def render_scanner_table(watchlist, data_map):
                 "Symbol": symbol,
                 "Price": "Error",
                 "Change": "---",
-                "GEX State": "⚠️ Data Unavailable",
+                "GEX State": "⚠️ 數據不可用",
                 "Max Pain": "---",
                 "Walls (Call/Put)": "---",
                 "Category": entry.category or "—"
@@ -111,20 +111,20 @@ def render_scanner_table(watchlist, data_map):
         price: MarketSnapshot = data["price"]
         gex: GEXProfile = data["gex"]
         
-        # Format Price Change
+        # 格式化價格變動
         change_str = f"{price.change_pct:+.2f}%"
         
-        # Format Max Pain Distance
+        # 格式化 Max Pain 距離
         if gex.max_pain:
             dist_pct = ((gex.max_pain - price.current_price) / price.current_price) * 100
             mp_str = f"${gex.max_pain:.2f} ({dist_pct:+.1f}%)"
         else:
             mp_str = "N/A"
             
-        # Format Walls
+        # 格式化牆
         walls_str = f"C: ${gex.call_wall} / P: ${gex.put_wall}" if (gex.call_wall and gex.put_wall) else "N/A"
         
-        # GEX State Badge
+        # GEX 狀態徽章
         state_icon = "🐂" if gex.gex_state == "Bullish" else "🐻" if gex.gex_state == "Bearish" else "⚖️"
         state_display = f"{state_icon} {gex.gex_state}"
 
@@ -136,7 +136,7 @@ def render_scanner_table(watchlist, data_map):
             "Max Pain": mp_str,
             "Walls (Call/Put)": walls_str,
             "Category": entry.category or "—",
-            "_raw_change": price.change_pct  # Hidden for styling if needed
+            "_raw_change": price.change_pct  # 隱藏欄位，若需要可用於樣式設定
         })
         
     if not table_data:
@@ -144,7 +144,7 @@ def render_scanner_table(watchlist, data_map):
 
     df = pd.DataFrame(table_data)
     
-    # Style the dataframe
+    # 設定 dataframe 樣式
     st.dataframe(
         df,
         column_config={
@@ -161,62 +161,62 @@ def render_scanner_table(watchlist, data_map):
     return df
 
 def render_deep_dive(symbol: str, data: dict):
-    """Render User Story 3: Deep Dive Analysis."""
+    """渲染使用者故事 3: 深入分析。"""
     st.divider()
-    st.header(f"🔍 Deep Dive: {symbol}")
+    st.header(f"🔍 深入分析: {symbol}")
     
     if data["status"] == "error":
-        st.error(f"Unable to load analysis for {symbol}: {data['error']}")
+        st.error(f"無法載入 {symbol} 的分析: {data['error']}")
         return
 
     price: MarketSnapshot = data["price"]
     gex: GEXProfile = data["gex"]
     sent: SentimentIndicators = data["sentiment"]
     
-    # --- Top Level Metrics ---
+    # --- 頂層指標 ---
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Current Price", f"${price.current_price:.2f}", f"{price.change_pct:+.2f}%")
-    col2.metric("Net GEX", f"${gex.net_gex / 1_000_000_000:.2f}B", delta_color="off")
+    col1.metric("當前價格", f"${price.current_price:.2f}", f"{price.change_pct:+.2f}%")
+    col2.metric("淨 GEX", f"${gex.net_gex / 1_000_000_000:.2f}B", delta_color="off")
     col3.metric("RSI (14)", f"{sent.rsi:.1f}")
-    col4.metric("IV Percentile", f"{sent.iv_percentile:.0f}%")
+    col4.metric("IV 百分位數", f"{sent.iv_percentile:.0f}%")
     
-    # --- Structure Cards ---
+    # --- 結構卡片 ---
     c1, c2 = st.columns([1, 1])
     
     with c1:
-        st.subheader("🏰 GEX Walls & Levels")
+        st.subheader("🏰 GEX 牆與水平")
         st.info(f"""
-        **Call Wall (Resistance):** ${gex.call_wall}
+        **Call 牆 (壓力):** ${gex.call_wall}
         
-        **Max Pain (Magnet):** ${gex.max_pain}
+        **Max Pain (磁鐵):** ${gex.max_pain}
         
-        **Put Wall (Support):** ${gex.put_wall}
+        **Put 牆 (支撐):** ${gex.put_wall}
         """)
     
     with c2:
-        st.subheader("🌡️ Sentiment & Positioning")
-        pcr_delta = "Neutral"
-        if sent.pcr > 1.0: pcr_delta = "Bearish (High Puts)"
-        elif sent.pcr < 0.7: pcr_delta = "Bullish (High Calls)"
+        st.subheader("🌡️ 情緒與部位")
+        pcr_delta = "中性"
+        if sent.pcr > 1.0: pcr_delta = "看跌 (Put 多)"
+        elif sent.pcr < 0.7: pcr_delta = "看漲 (Call 多)"
         
         st.success(f"""
-        **Put/Call Ratio:** {sent.pcr:.2f} ({pcr_delta})
+        **Put/Call 比率:** {sent.pcr:.2f} ({pcr_delta})
         
-        **GEX State:** {gex.gex_state}
+        **GEX 狀態:** {gex.gex_state}
         
-        **Volatility:** IV Rank is {sent.iv_percentile:.0f}% of 52-week range
+        **波動率:** IV Rank 為 52 週範圍的 {sent.iv_percentile:.0f}%
         """)
 
-    # --- AI Analysis ---
-    st.subheader("🤖 AI Structure Analyst")
+    # --- AI 分析 ---
+    st.subheader("🤖 AI 結構分析師")
     
     if "ai_analysis_cache" not in st.session_state:
         st.session_state.ai_analysis_cache = {}
         
     cache_key = f"{symbol}_{datetime.now().strftime('%Y%m%d_%H')}"
     
-    if st.button(f"Generate Analysis for {symbol}", type="primary"):
-        with st.spinner("Consulting AI Analyst..."):
+    if st.button(f"為 {symbol} 產生分析", type="primary"):
+        with st.spinner("正在諮詢 AI 分析師..."):
             try:
                 if cache_key in st.session_state.ai_analysis_cache:
                     analysis = st.session_state.ai_analysis_cache[cache_key]
@@ -226,39 +226,39 @@ def render_deep_dive(symbol: str, data: dict):
                 
                 st.markdown(analysis)
             except Exception as e:
-                st.error(f"Analysis generation failed: {e}")
+                st.error(f"分析產生失敗: {e}")
 
-# --- Main Execution Flow ---
+# --- 主要執行流程 ---
 
 st.divider()
 
-# Get current watchlist
+# 獲取當前觀察清單
 watchlist = get_all_symbols()
 
 if not watchlist:
-    # Empty state
+    # 空狀態
     st.info("""
-    ### 👋 Welcome to GEX Sentinel!
-    Your watchlist is empty. Add symbols in the sidebar to start monitoring market structure.
+    ### 👋 歡迎來到 GEX Sentinel!
+    您的觀察清單是空的。請在側邊欄新增股票以開始監控市場結構。
     """)
 else:
-    # 1. Batch Fetch Data
+    # 1. 批次獲取數據
     data_map = fetch_batch_data(watchlist)
     
-    # 2. Render Scanner Table
+    # 2. 渲染掃描器表格
     render_scanner_table(watchlist, data_map)
     
-    # 3. Check for Selection
+    # 3. 檢查選擇
     selection = st.session_state.get("scanner_selection")
     if selection and selection["selection"]["rows"]:
         selected_idx = selection["selection"]["rows"][0]
         if selected_idx < len(watchlist):
             selected_symbol = watchlist[selected_idx].symbol
             
-            # 4. Render Render Deep Dive
+            # 4. 渲染深入分析
             if selected_symbol in data_map:
                 render_deep_dive(selected_symbol, data_map[selected_symbol])
 
-# Footer
+# 頁尾
 st.divider()
-st.caption("Built with ❤️ | Constitution Principles: Privacy-First | Performance Through Caching | Structure Over Price")
+st.caption("Built with ❤️ | 憲法原則: 隱私優先 | 透過快取提升效能 | 結構優於價格")

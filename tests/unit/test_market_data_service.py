@@ -66,7 +66,7 @@ def test_fetch_options_chain_no_options_available():
         # Mock no options available
         mock_ticker.return_value.options = []
 
-        with pytest.raises(ValueError, match="No options available"):
+        with pytest.raises(ValueError, match="無可用選擇權"):
             fetch_options_chain("ILLIQUID")
 
 
@@ -103,7 +103,11 @@ def test_fetch_price_snapshot_invalid_symbol():
     from src.services.market_data_service import fetch_price_snapshot
 
     with patch('yfinance.Ticker') as mock_ticker:
-        mock_ticker.return_value.info = {}
-
-        with pytest.raises(ValueError, match="No price data"):
-            fetch_price_snapshot("INVALID")
+        # Mock info returning empty dict repeatedly or raising Exception to simulate failure
+        # The service retries 3 times. We can simulate the final failure by returning None/Empty
+        mock_ticker.return_value.info = {} 
+        
+        # We need to patch time.sleep to speed up the test
+        with patch('time.sleep'):
+             with pytest.raises(ValueError, match="無法獲取"):
+                fetch_price_snapshot("INVALID")

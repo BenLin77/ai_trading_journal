@@ -1,7 +1,7 @@
 """
-Watchlist service for managing user-tracked symbols.
+觀察清單服務，用於管理使用者追蹤的股票。
 
-Implements CRUD operations per service_contracts.md Section 1.
+根據 service_contracts.md 第 1 節實作 CRUD 操作。
 """
 
 from typing import List, Optional
@@ -15,42 +15,42 @@ from src.models.watchlist import WatchlistEntry
 
 def add_symbol(symbol: str, category: Optional[str] = None) -> WatchlistEntry:
     """
-    Add a new symbol to the watchlist after validation.
+    驗證後將新股票新增至觀察清單。
 
     Args:
-        symbol: Ticker symbol (e.g., "NVDA")
-        category: Optional category (e.g., "Tech", "Core")
+        symbol: 股票代碼 (例如 "NVDA")
+        category: 可選分類 (例如 "Tech", "Core")
 
     Returns:
-        WatchlistEntry: The newly added watchlist entry
+        WatchlistEntry: 新增的觀察清單項目
 
     Raises:
-        ValueError: If symbol is invalid (not found via yfinance)
-        sqlite3.IntegrityError: If symbol already exists (UNIQUE constraint)
+        ValueError: 如果股票代碼無效 (yfinance 找不到)
+        sqlite3.IntegrityError: 如果股票代碼已存在 (UNIQUE 約束)
 
     Preconditions:
-    - Database initialized with watchlist table
-    - symbol is non-empty
+        - 資料庫已初始化並包含 watchlist 資料表
+        - symbol 非空
 
     Postconditions:
-    - New row inserted in watchlist table
-    - Symbol appears in UI sidebar immediately
+        - 新資料列插入 watchlist 資料表
+        - 股票立即顯示在 UI 側邊欄
     """
-    # Uppercase symbol per validation rules
+    # 根據驗證規則轉換為大寫
     symbol = symbol.strip().upper()
 
     if not symbol:
-        raise ValueError("Symbol cannot be empty")
+        raise ValueError("股票代碼不能為空")
 
-    # Validate symbol via yfinance
+    # 透過 yfinance 驗證股票代碼
     ticker = yf.Ticker(symbol)
     info = ticker.info
 
-    # Check if symbol is valid (has data)
+    # 檢查股票代碼是否有效 (有數據)
     if not info or (info.get('regularMarketPrice') is None and info.get('symbol') is None):
-        raise ValueError(f"Invalid symbol: {symbol}")
+        raise ValueError(f"無效的股票代碼: {symbol}")
 
-    # Insert into database
+    # 插入資料庫
     conn = get_db_connection()
     cursor = conn.execute(
         """
@@ -61,7 +61,7 @@ def add_symbol(symbol: str, category: Optional[str] = None) -> WatchlistEntry:
     )
     conn.commit()
 
-    # Retrieve the inserted row
+    # 檢索插入的資料列
     row_id = cursor.lastrowid
     cursor = conn.execute(
         "SELECT * FROM watchlist WHERE id = ?",
@@ -69,7 +69,7 @@ def add_symbol(symbol: str, category: Optional[str] = None) -> WatchlistEntry:
     )
     row = cursor.fetchone()
 
-    # Convert to WatchlistEntry
+    # 轉換為 WatchlistEntry
     return WatchlistEntry(
         id=row['id'],
         symbol=row['symbol'],
@@ -82,20 +82,20 @@ def add_symbol(symbol: str, category: Optional[str] = None) -> WatchlistEntry:
 
 def remove_symbol(symbol: str) -> bool:
     """
-    Remove a symbol from the watchlist.
+    從觀察清單中移除股票。
 
     Args:
-        symbol: Ticker to remove
+        symbol: 要移除的股票代碼
 
     Returns:
-        bool: True if deleted, False if symbol not found
+        bool: 若刪除成功回傳 True，若找不到股票回傳 False
 
     Errors:
-    - None (gracefully handles missing symbols)
+        - None (優雅地處理遺失的股票)
 
     Postconditions:
-    - Row deleted from watchlist table
-    - Symbol removed from UI sidebar
+        - 資料列從 watchlist 資料表中刪除
+        - 股票從 UI 側邊欄移除
     """
     symbol = symbol.strip().upper()
 
@@ -106,21 +106,21 @@ def remove_symbol(symbol: str) -> bool:
     )
     conn.commit()
 
-    # Check if any rows were deleted
+    # 檢查是否有資料列被刪除
     return cursor.rowcount > 0
 
 
 def get_all_symbols() -> List[WatchlistEntry]:
     """
-    Retrieve all symbols in the watchlist.
+    檢索觀察清單中的所有股票。
 
     Returns:
-        List[WatchlistEntry]: Ordered by added_at DESC (newest first)
+        List[WatchlistEntry]: 依 added_at DESC 排序 (最新的在先)
 
     Errors:
-    - sqlite3.Error: Database connection failure
+        - sqlite3.Error: 資料庫連線失敗
 
-    Postconditions: None (read-only)
+    Postconditions: None (唯讀)
     """
     conn = get_db_connection()
     cursor = conn.execute(
@@ -147,17 +147,17 @@ def get_all_symbols() -> List[WatchlistEntry]:
 
 def get_symbols_by_category(category: str) -> List[WatchlistEntry]:
     """
-    Filter watchlist by category (P4 user story).
+    依分類篩選觀察清單 (P4 使用者故事)。
 
     Args:
-        category: e.g., "Tech", "Core"
+        category: 例如 "Tech", "Core"
 
     Returns:
-        List[WatchlistEntry]: Symbols with matching category
+        List[WatchlistEntry]: 符合分類的股票
 
     Errors: None
 
-    Postconditions: None (read-only)
+    Postconditions: None (唯讀)
     """
     conn = get_db_connection()
     cursor = conn.execute(

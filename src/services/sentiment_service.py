@@ -1,7 +1,7 @@
 """
-Sentiment service for calculating RSI, PCR, and IV percentile.
+情緒服務，用於計算 RSI、PCR 和 IV 百分位數。
 
-Implements technical indicators per service_contracts.md Section 4.
+根據 service_contracts.md 第 4 節實作技術指標。
 """
 
 import streamlit as st
@@ -17,53 +17,53 @@ from src.services.market_data_service import fetch_options_chain, fetch_iv_histo
 @st.cache_data(ttl=300)
 def calculate_sentiment_indicators(symbol: str) -> SentimentIndicators:
     """
-    Calculate RSI, PCR, IV percentile (cached 5 min).
+    計算 RSI、PCR、IV 百分位數 (快取 5 分鐘)。
 
     Args:
-        symbol: Ticker symbol
+        symbol: 股票代碼
 
     Returns:
-        SentimentIndicators: RSI, PCR, IV percentile, timestamp
+        SentimentIndicators: RSI、PCR、IV 百分位數、時間戳記
 
     Raises:
-        ValueError: Insufficient data for RSI (need 14+ days)
-        ValueError: No IV history (illiquid stock)
+        ValueError: RSI 數據不足 (需要 14 天以上)
+        ValueError: 無 IV 歷史記錄 (流動性不足的股票)
 
-    Calculations (from service_contracts.md):
-        RSI (14-period Wilder's): 100 - (100 / (1 + RS))  # RS = avg_gain / avg_loss
-        PCR: sum(put_OI) / sum(call_OI)  # Cap at 10.0 if calls → 0
+    計算 (來自 service_contracts.md):
+        RSI (14 週期 Wilder's): 100 - (100 / (1 + RS))  # RS = 平均漲幅 / 平均跌幅
+        PCR: sum(put_OI) / sum(call_OI)  # 若 calls → 0 則上限為 10.0
         IV Percentile: percentile_rank(current_iv, iv_52w_history)
 
     Caching:
         @st.cache_data(ttl=300) on (symbol,)
     """
-    # Fetch options chain for PCR and current IV
+    # 獲取選擇權鏈以計算 PCR 和當前 IV
     options_chain = fetch_options_chain(symbol)
 
-    # Calculate PCR (Put/Call Ratio)
+    # 計算 PCR (Put/Call 比率)
     total_put_oi = options_chain.puts['openInterest'].sum()
     total_call_oi = options_chain.calls['openInterest'].sum()
 
     if total_call_oi == 0:
-        pcr = 10.0  # Cap at 10.0 per validation rules
+        pcr = 10.0  # 根據驗證規則上限為 10.0
     else:
         pcr = total_put_oi / total_call_oi
-        pcr = min(pcr, 10.0)  # Cap at 10.0
+        pcr = min(pcr, 10.0)  # 上限為 10.0
 
-    # Calculate RSI
+    # 計算 RSI
     ticker = yf.Ticker(symbol)
-    hist = ticker.history(period="3mo")  # 3 months for RSI calculation
+    hist = ticker.history(period="3mo")  # 3 個月數據用於 RSI 計算
 
-    if len(hist) < 15:  # Need 14+ days for RSI
-        raise ValueError(f"Insufficient data for RSI calculation: only {len(hist)} days available")
+    if len(hist) < 15:  # 需要 14 天以上計算 RSI
+        raise ValueError(f"RSI 計算數據不足: 只有 {len(hist)} 天可用")
 
     rsi = _calculate_rsi(hist['Close'], period=14)
 
-    # Calculate IV Percentile
+    # 計算 IV 百分位數
     try:
         iv_history = fetch_iv_history(symbol, period="1y")
 
-        # Get current IV (average of ATM options)
+        # 獲取當前 IV (ATM 選擇權的平均值)
         spot_price = hist['Close'].iloc[-1]
         atm_calls = options_chain.calls[
             (options_chain.calls['strike'] >= spot_price * 0.95) &
@@ -75,12 +75,12 @@ def calculate_sentiment_indicators(symbol: str) -> SentimentIndicators:
         else:
             current_iv = options_chain.calls['impliedVolatility'].mean()
 
-        # Calculate percentile rank
+        # 計算百分位排名
         iv_percentile = (iv_history < current_iv).sum() / len(iv_history) * 100
 
     except Exception as e:
-        # Fallback if IV history unavailable
-        iv_percentile = 50.0  # Neutral
+        # 若 IV 歷史記錄不可用則使用備案
+        iv_percentile = 50.0  # 中性
 
     return SentimentIndicators(
         symbol=symbol,
@@ -93,44 +93,44 @@ def calculate_sentiment_indicators(symbol: str) -> SentimentIndicators:
 
 def _calculate_rsi(prices: pd.Series, period: int = 14) -> float:
     """
-    Calculate Relative Strength Index (14-period Wilder's RSI).
+    計算相對強弱指數 (14 週期 Wilder's RSI)。
 
     Args:
-        prices: Series of closing prices
-        period: RSI period (default: 14)
+        prices: 收盤價序列
+        period: RSI 週期 (預設: 14)
 
     Returns:
-        float: RSI value in [0, 100] range
+        float: RSI 值，範圍 [0, 100]
 
-    Formula:
+    公式:
         RSI = 100 - (100 / (1 + RS))
-        RS = average_gain / average_loss (Wilder's smoothing)
+        RS = 平均漲幅 / 平均跌幅 (Wilder's 平滑)
     """
-    # Calculate price changes
+    # 計算價格變動
     delta = prices.diff()
 
-    # Separate gains and losses
+    # 分離漲幅和跌幅
     gains = delta.where(delta > 0, 0)
     losses = -delta.where(delta < 0, 0)
 
-    # Calculate Wilder's smoothed averages
+    # 計算 Wilder's 平滑平均值
     avg_gain = gains.rolling(window=period, min_periods=period).mean().iloc[-1]
     avg_loss = losses.rolling(window=period, min_periods=period).mean().iloc[-1]
 
     if avg_loss == 0:
-        return 100.0  # No losses = overbought
+        return 100.0  # 無跌幅 = 超買
 
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
 
-    # Clamp to [0, 100] range per validation rules
+    # 根據驗證規則限制在 [0, 100] 範圍內
     return max(0.0, min(100.0, rsi))
 
 
 def _fetch_iv_history(symbol: str) -> pd.Series:
     """
-    Wrapper for fetch_iv_history to allow mocking in tests.
+    fetch_iv_history 的包裝器，允許在測試中進行 mock。
 
-    This function exists to enable patching in unit tests.
+    此函式存在是為了在單元測試中啟用 patching。
     """
     return fetch_iv_history(symbol, period="1y")

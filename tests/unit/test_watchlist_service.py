@@ -112,7 +112,7 @@ def test_add_symbol_invalid_symbol_rejection(temp_db):
     with patch('yfinance.Ticker') as mock_ticker:
         mock_ticker.return_value.info = {}  # Empty info = invalid symbol
 
-        with pytest.raises(ValueError, match="Invalid symbol"):
+        with pytest.raises(ValueError, match="無效的股票代碼"):
             add_symbol("INVALID123")
 
 

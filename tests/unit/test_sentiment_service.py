@@ -147,5 +147,5 @@ def test_calculate_rsi_insufficient_data():
         })
         mock_ticker.return_value.history.return_value = mock_hist
 
-        with pytest.raises(ValueError, match="Insufficient data for RSI"):
+        with pytest.raises(ValueError, match="RSI 計算數據不足"):
             calculate_sentiment_indicators("NVDA_INSUFFICIENT")
