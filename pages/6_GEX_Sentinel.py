@@ -43,6 +43,12 @@ def on_symbol_removed(symbol: str):
 
 render_watchlist_management(on_symbol_removed=on_symbol_removed)
 
+# Add Refresh Button to Sidebar (T072)
+st.sidebar.divider()
+if st.sidebar.button("🔄 Refresh Data", help="Clear cache and reload all data"):
+    st.cache_data.clear()
+    st.rerun()
+
 # --- Data Fetching & Processing ---
 
 @st.cache_data(ttl=300)

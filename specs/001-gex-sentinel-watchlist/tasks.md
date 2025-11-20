@@ -102,27 +102,27 @@
 
 ### Tests for User Story 2 (TDD - Write FIRST) ⚠️
 
-- [ ] T031 [P] [US2] Write unit test for fetch_options_chain() in tests/unit/test_market_data_service.py (returns OptionsChain with calls/puts DataFrames)
-- [ ] T032 [P] [US2] Write unit test for fetch_price_snapshot() in tests/unit/test_market_data_service.py (returns MarketSnapshot with change_pct calculated)
-- [ ] T033 [P] [US2] Write unit test for calculate_gex_profile() in tests/unit/test_gex_calculator.py (net_gex calculated correctly, gex_state="Bullish" if net_gex>0)
-- [ ] T034 [P] [US2] Write unit test for _calculate_gamma() helper in tests/unit/test_gex_calculator.py (Black-Scholes gamma formula correct)
-- [ ] T035 [P] [US2] Write unit test for _calculate_max_pain() helper in tests/unit/test_gex_calculator.py (finds strike with min intrinsic loss)
-- [ ] T036 [P] [US2] Write unit test for GEX calculation with missing data in tests/unit/test_gex_calculator.py (ValueError if no options chain)
-- [ ] T037 [P] [US2] Write unit test for GEX calculation timeout in tests/unit/test_gex_calculator.py (RuntimeError if >2s)
+- [x] T031 [P] [US2] Write unit test for fetch_options_chain() in tests/unit/test_market_data_service.py (returns OptionsChain with calls/puts DataFrames)
+- [x] T032 [P] [US2] Write unit test for fetch_price_snapshot() in tests/unit/test_market_data_service.py (returns MarketSnapshot with change_pct calculated)
+- [x] T033 [P] [US2] Write unit test for calculate_gex_profile() in tests/unit/test_gex_calculator.py (net_gex calculated correctly, gex_state="Bullish" if net_gex>0)
+- [x] T034 [P] [US2] Write unit test for _calculate_gamma() helper in tests/unit/test_gex_calculator.py (Black-Scholes gamma formula correct)
+- [x] T035 [P] [US2] Write unit test for _calculate_max_pain() helper in tests/unit/test_gex_calculator.py (finds strike with min intrinsic loss)
+- [x] T036 [P] [US2] Write unit test for GEX calculation with missing data in tests/unit/test_gex_calculator.py (ValueError if no options chain)
+- [x] T037 [P] [US2] Write unit test for GEX calculation timeout in tests/unit/test_gex_calculator.py (RuntimeError if >2s)
 
 ### Implementation for User Story 2
 
-- [ ] T038 [P] [US2] Implement fetch_options_chain(symbol, expiry) with @st.cache_data(ttl=300) in src/services/market_data_service.py (yfinance wrapper, retry logic, return OptionsChain dataclass)
-- [ ] T039 [P] [US2] Implement fetch_price_snapshot(symbol) with @st.cache_data(ttl=300) in src/services/market_data_service.py (yfinance Ticker.info, calculate change_pct, return MarketSnapshot)
-- [ ] T040 [US2] Implement _calculate_gamma(strike, spot, iv, tte) in src/services/gex_calculator.py (Black-Scholes formula using scipy.stats.norm)
-- [ ] T041 [US2] Implement _calculate_max_pain(options_chain) in src/services/gex_calculator.py (iterate strikes, sum intrinsic losses, return min)
-- [ ] T042 [US2] Implement calculate_gex_profile(symbol) with @st.cache_data(ttl=300) in src/services/gex_calculator.py (fetch options chain, calculate per-strike GEX, determine net_gex/state/walls/max_pain, return GEXProfile)
-- [ ] T043 [US2] Add performance timeout check to calculate_gex_profile() in src/services/gex_calculator.py (raise RuntimeError if >2s per PERF-002)
-- [ ] T044 [US2] Implement batch fetching logic with progress bar in src/ui/scanner_view.py (st.progress and st.empty for status text, iterate watchlist symbols, handle errors gracefully)
-- [ ] T045 [US2] Create scanner table component in src/ui/scanner_view.py (build DataFrame with Ticker, Price, Change%, GEX State, Max Pain, Call/Put Walls columns, color-code prices)
-- [ ] T046 [US2] Wire scanner view to main page in pages/6_GEX_Sentinel.py (fetch all symbols, batch call GEX/price fetchers with progress bar, display st.dataframe with column configuration)
-- [ ] T047 [US2] Add empty watchlist onboarding message in pages/6_GEX_Sentinel.py (if watchlist empty, display "Your watchlist is empty. Add symbols above to start monitoring market structure.")
-- [ ] T048 [US2] Add error state handling for missing options data in src/ui/scanner_view.py (display "N/A" for GEX fields if ValueError, show warning icon with tooltip)
+- [x] T038 [P] [US2] Implement fetch_options_chain(symbol, expiry) with @st.cache_data(ttl=300) in src/services/market_data_service.py (yfinance wrapper, retry logic, return OptionsChain dataclass)
+- [x] T039 [P] [US2] Implement fetch_price_snapshot(symbol) with @st.cache_data(ttl=300) in src/services/market_data_service.py (yfinance Ticker.info, calculate change_pct, return MarketSnapshot)
+- [x] T040 [US2] Implement _calculate_gamma(strike, spot, iv, tte) in src/services/gex_calculator.py (Black-Scholes formula using scipy.stats.norm)
+- [x] T041 [US2] Implement _calculate_max_pain(options_chain) in src/services/gex_calculator.py (iterate strikes, sum intrinsic losses, return min)
+- [x] T042 [US2] Implement calculate_gex_profile(symbol) with @st.cache_data(ttl=300) in src/services/gex_calculator.py (fetch options chain, calculate per-strike GEX, determine net_gex/state/walls/max_pain, return GEXProfile)
+- [x] T043 [US2] Add performance timeout check to calculate_gex_profile() in src/services/gex_calculator.py (raise RuntimeError if >2s per PERF-002)
+- [x] T044 [US2] Implement batch fetching logic with progress bar in src/ui/scanner_view.py (st.progress and st.empty for status text, iterate watchlist symbols, handle errors gracefully)
+- [x] T045 [US2] Create scanner table component in src/ui/scanner_view.py (build DataFrame with Ticker, Price, Change%, GEX State, Max Pain, Call/Put Walls columns, color-code prices)
+- [x] T046 [US2] Wire scanner view to main page in pages/6_GEX_Sentinel.py (fetch all symbols, batch call GEX/price fetchers with progress bar, display st.dataframe with column configuration)
+- [x] T047 [US2] Add empty watchlist onboarding message in pages/6_GEX_Sentinel.py (if watchlist empty, display "Your watchlist is empty. Add symbols above to start monitoring market structure.")
+- [x] T048 [US2] Add error state handling for missing options data in src/ui/scanner_view.py (display "N/A" for GEX fields if ValueError, show warning icon with tooltip)
 
 **Checkpoint**: At this point, User Stories 1 AND 2 should both work independently
 
@@ -136,27 +136,27 @@
 
 ### Tests for User Story 3 (TDD - Write FIRST) ⚠️
 
-- [ ] T049 [P] [US3] Write unit test for calculate_sentiment_indicators() in tests/unit/test_sentiment_service.py (RSI calculation correct for 14-period)
-- [ ] T050 [P] [US3] Write unit test for PCR calculation in tests/unit/test_sentiment_service.py (put_OI / call_OI, capped at 10.0)
-- [ ] T051 [P] [US3] Write unit test for IV percentile calculation in tests/unit/test_sentiment_service.py (percentile rank of current vs 52-week history)
-- [ ] T052 [P] [US3] Write unit test for sentiment with insufficient data in tests/unit/test_sentiment_service.py (ValueError if <14 days for RSI)
-- [ ] T053 [P] [US3] Write unit test for generate_structure_analysis() in tests/unit/test_ai_service.py (returns markdown string, calls LLM API with correct prompt)
-- [ ] T054 [P] [US3] Write unit test for AI analysis timeout in tests/unit/test_ai_service.py (requests.Timeout if >5s per SC-006)
+- [x] T049 [P] [US3] Write unit test for calculate_sentiment_indicators() in tests/unit/test_sentiment_service.py (RSI calculation correct for 14-period)
+- [x] T050 [P] [US3] Write unit test for PCR calculation in tests/unit/test_sentiment_service.py (put_OI / call_OI, capped at 10.0)
+- [x] T051 [P] [US3] Write unit test for IV percentile calculation in tests/unit/test_sentiment_service.py (percentile rank of current vs 52-week history)
+- [x] T052 [P] [US3] Write unit test for sentiment with insufficient data in tests/unit/test_sentiment_service.py (ValueError if <14 days for RSI)
+- [x] T053 [P] [US3] Write unit test for generate_structure_analysis() in tests/unit/test_ai_service.py (returns markdown string, calls LLM API with correct prompt)
+- [x] T054 [P] [US3] Write unit test for AI analysis timeout in tests/unit/test_ai_service.py (requests.Timeout if >5s per SC-006)
 
 ### Implementation for User Story 3
 
-- [ ] T055 [P] [US3] Implement fetch_iv_history(symbol, period) with @st.cache_data(ttl=3600) in src/services/market_data_service.py (yfinance historical IV data, return pd.Series)
-- [ ] T056 [P] [US3] Implement RSI calculation in src/services/sentiment_service.py (14-period Wilder's RSI, handle insufficient data)
-- [ ] T057 [US3] Implement calculate_sentiment_indicators(symbol) with @st.cache_data(ttl=300) in src/services/sentiment_service.py (fetch options chain for PCR, fetch IV history for percentile, calculate RSI, return SentimentIndicators)
-- [ ] T058 [US3] Implement generate_structure_analysis(symbol, gex_profile, sentiment) in src/services/ai_service.py (load LLM_API_KEY from env, format prompt template, call API with 5s timeout, return markdown text)
-- [ ] T059 [US3] Add LLM API error handling in src/services/ai_service.py (ValueError if no API key, requests.Timeout with user message)
-- [ ] T060 [US3] Create structure card component in src/ui/deep_dive_view.py (display Net GEX value with B/M suffix, GEX state badge with emoji)
-- [ ] T061 [US3] Create walls visualization component in src/ui/deep_dive_view.py (vertical list showing Call Wall, Max Pain (center), Put Wall with plotly or st.metric)
-- [ ] T062 [US3] Create sentiment card component in src/ui/deep_dive_view.py (RSI gauge 0-100 with plotly indicator, PCR ratio display)
-- [ ] T063 [US3] Add symbol selection mechanism in pages/6_GEX_Sentinel.py (st.selectbox after scanner table or row click handler via st.dataframe selection_mode)
-- [ ] T064 [US3] Wire deep dive view to selected symbol in pages/6_GEX_Sentinel.py (fetch GEXProfile and SentimentIndicators from cache, display structure/walls/sentiment cards)
-- [ ] T065 [US3] Add "🤖 Analyze Structure" button in pages/6_GEX_Sentinel.py (st.button triggers AI analysis, display loading spinner, show result with st.markdown)
-- [ ] T066 [US3] Add view toggle between scanner and deep dive in pages/6_GEX_Sentinel.py (st.session_state to track current view, transition in <1s per SC-005)
+- [x] T055 [P] [US3] Implement fetch_iv_history(symbol, period) with @st.cache_data(ttl=3600) in src/services/market_data_service.py (yfinance historical IV data, return pd.Series)
+- [x] T056 [P] [US3] Implement RSI calculation in src/services/sentiment_service.py (14-period Wilder's RSI, handle insufficient data)
+- [x] T057 [US3] Implement calculate_sentiment_indicators(symbol) with @st.cache_data(ttl=300) in src/services/sentiment_service.py (fetch options chain for PCR, fetch IV history for percentile, calculate RSI, return SentimentIndicators)
+- [x] T058 [US3] Implement generate_structure_analysis(symbol, gex_profile, sentiment) in src/services/ai_service.py (load LLM_API_KEY from env, format prompt template, call API with 5s timeout, return markdown text)
+- [x] T059 [US3] Add LLM API error handling in src/services/ai_service.py (ValueError if no API key, requests.Timeout with user message)
+- [x] T060 [US3] Create structure card component in src/ui/deep_dive_view.py (display Net GEX value with B/M suffix, GEX state badge with emoji)
+- [x] T061 [US3] Create walls visualization component in src/ui/deep_dive_view.py (vertical list showing Call Wall, Max Pain (center), Put Wall with plotly or st.metric)
+- [x] T062 [US3] Create sentiment card component in src/ui/deep_dive_view.py (RSI gauge 0-100 with plotly indicator, PCR ratio display)
+- [x] T063 [US3] Add symbol selection mechanism in pages/6_GEX_Sentinel.py (st.selectbox after scanner table or row click handler via st.dataframe selection_mode)
+- [x] T064 [US3] Wire deep dive view to selected symbol in pages/6_GEX_Sentinel.py (fetch GEXProfile and SentimentIndicators from cache, display structure/walls/sentiment cards)
+- [x] T065 [US3] Add "🤖 Analyze Structure" button in pages/6_GEX_Sentinel.py (st.button triggers AI analysis, display loading spinner, show result with st.markdown)
+- [x] T066 [US3] Add view toggle between scanner and deep dive in pages/6_GEX_Sentinel.py (st.session_state to track current view, transition in <1s per SC-005)
 
 **Checkpoint**: All core user stories (P1-P3) should now be independently functional
 
@@ -170,9 +170,9 @@
 
 ### Implementation for User Story 4 (OPTIONAL)
 
-- [ ] T067 [P] [US4] Write unit test for get_symbols_by_category() in tests/unit/test_watchlist_service.py (returns filtered list)
-- [ ] T068 [US4] Implement get_symbols_by_category(category) in src/services/watchlist_service.py (SELECT * FROM watchlist WHERE category=?)
-- [ ] T069 [US4] Add category dropdown to sidebar add form in src/ui/sidebar.py (st.selectbox with ["Tech", "Core", "Speculative", None])
+- [x] T067 [P] [US4] Write unit test for get_symbols_by_category() in tests/unit/test_watchlist_service.py (returns filtered list)
+- [x] T068 [US4] Implement get_symbols_by_category(category) in src/services/watchlist_service.py (SELECT * FROM watchlist WHERE category=?)
+- [x] T069 [US4] Add category dropdown to sidebar add form in src/ui/sidebar.py (st.selectbox with ["Tech", "Core", "Speculative", None])
 - [ ] T070 [US4] Add category filter to scanner view in src/ui/scanner_view.py (st.selectbox to filter displayed symbols)
 - [ ] T071 [US4] Add category grouping headers to scanner table in src/ui/scanner_view.py (st.subheader for each category section if enabled)
 
@@ -189,9 +189,9 @@
 - [ ] T074 [P] Add API rate limit handling and circuit breaker in src/services/market_data_service.py (track consecutive failures, pause with cooldown message)
 - [ ] T075 [P] Add pagination or virtual scrolling for large watchlists in src/ui/scanner_view.py (if >30 symbols, use st.dataframe height limit)
 - [ ] T076 Add performance logging for GEX calculations in src/services/gex_calculator.py (log warning if >2s, log timing stats)
-- [ ] T077 [P] Write README.md quickstart section at repository root (setup instructions, running app, TDD workflow)
-- [ ] T078 [P] Create example .env.example file if not exists (LLM_API_KEY, DB_PATH templates)
-- [ ] T079 Run complete test suite and verify all tests pass (uv run pytest tests/ --cov=src)
+- [x] T077 [P] Write README.md quickstart section at repository root (setup instructions, running app, TDD workflow)
+- [x] T078 [P] Create example .env.example file if not exists (LLM_API_KEY, DB_PATH templates)
+- [x] T079 Run complete test suite and verify all tests pass (uv run pytest tests/ --cov=src)
 - [ ] T080 Run performance validation tests per quickstart.md (verify SC-001 through SC-006 targets met)
 
 ---
