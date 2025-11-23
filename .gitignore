@@ -1,0 +1,57 @@
+# Environment variables
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+.directory
+
+# Logs
+*.log
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# External dependencies
+external/
+lo2cin4bt/
+
+# Backtest results
+records/
+*.parquet
+
+# Private research reports (keep only examples)
+reports/*.md
+!reports/README.md
+!reports/EXAMPLE_*.md
