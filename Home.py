@@ -9,12 +9,25 @@ import pandas as pd
 from database import TradingDatabase
 from datetime import datetime
 from utils.derivatives_support import InstrumentParser
+from utils.option_strategy_detector import OptionStrategyDetector
+from utils.pnl_calculator import PnLCalculator
+from utils.ai_coach import AICoach  # 新增：匯入 AI 教練
 from pathlib import Path
 import os
 from dotenv import load_dotenv
+import plotly.graph_objects as go
+import hashlib
+import yfinance as yf
 
 # 載入環境變數
 load_dotenv()
+
+# 初始化日誌系統
+from utils.logging_config import setup_logging
+import logging
+
+setup_logging(log_level='INFO', log_file='trading_journal.log')
+logger = logging.getLogger(__name__)
 
 # 頁面配置
 st.set_page_config(
@@ -31,75 +44,663 @@ def init_db():
 
 db = init_db()
 
+# 每次會話開始時，強制執行一次 PnL 重算，確保數據正確
+if 'initial_pnl_recalc' not in st.session_state:
+    try:
+        # 這裡不顯示 spinner，以免影響使用者體驗，但會在背景執行
+        PnLCalculator(db).recalculate_all()
+        st.session_state['initial_pnl_recalc'] = True
+    except Exception as e:
+        print(f"Initial PnL recalculation failed: {e}")
+
+
+# 固定的 CSV 欄位對應
+COLUMN_MAPPING = {
+    'datetime': 'Date',
+    'symbol': 'Symbol',
+    'action': 'Side',
+    'quantity': 'Quantity',
+    'price': 'Price',
+    'commission': 'Commission',
+    'strike': 'Strike',
+    'expiry': 'Expiry',
+    'right': 'Right'
+}
+
+# --- 函數定義區 (Function Definitions) ---
+
+def process_and_import_csv(df, source_name="CSV"):
+    """處理並匯入 CSV 資料"""
+
+    # 驗證必要欄位
+    required_cols = [COLUMN_MAPPING['datetime'], COLUMN_MAPPING['symbol'],
+                     COLUMN_MAPPING['action'], COLUMN_MAPPING['quantity'],
+                     COLUMN_MAPPING['price']]
+
+    missing_cols = [col for col in required_cols if col not in df.columns]
+
+    if missing_cols:
+        st.error(f"❌ CSV 檔案缺少必要欄位：{', '.join(missing_cols)}")
+        st.info(f"**必要欄位**：{', '.join(required_cols)}")
+        return
+
+    # 顯示處理中訊息
+    st.toast(f"📊 正在處理 {len(df)} 筆交易記錄...")
+
+    # 建立進度指示器
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    new_count = 0
+    duplicate_count = 0
+    error_count = 0
+    total = len(df)
+
+    # 儲存所有處理後的交易（用於策略識別）
+    all_trades = []
+
+    for idx, row in df.iterrows():
+        # 更新進度
+        progress = (idx + 1) / total
+        progress_bar.progress(progress)
+        status_text.text(f"處理中... {idx + 1}/{total} ({progress*100:.1f}%)")
+
+        try:
+            symbol = str(row[COLUMN_MAPPING['symbol']]).strip()
+            action = str(row[COLUMN_MAPPING['action']]).strip().upper()
+
+            # 處理選擇權欄位（如果存在）
+            if COLUMN_MAPPING['strike'] in df.columns and not pd.isna(row.get(COLUMN_MAPPING['strike'])):
+                strike = str(row[COLUMN_MAPPING['strike']]).strip()
+                expiry = str(row.get(COLUMN_MAPPING['expiry'], '')).strip() if COLUMN_MAPPING['expiry'] in df.columns else ''
+                right = str(row.get(COLUMN_MAPPING['right'], '')).strip() if COLUMN_MAPPING['right'] in df.columns else ''
+
+                # 組合完整符號
+                underlying = symbol.split()[0]
+                if expiry and right:
+                    # 清理到期日格式（移除重複的權利類型）
+                    if right in expiry:
+                        expiry = expiry.replace(right, '').strip()
+                    symbol = f"{underlying} {expiry}{right}{strike}"
+
+            # 解析標的類型
+            parsed = InstrumentParser.parse_symbol(symbol)
+
+            # 基本交易資料
+            quantity = float(row[COLUMN_MAPPING['quantity']])
+            price = float(row[COLUMN_MAPPING['price']])
+            commission = float(row.get(COLUMN_MAPPING['commission'], 0)) if COLUMN_MAPPING['commission'] in df.columns and not pd.isna(row.get(COLUMN_MAPPING['commission'])) else 0
+
+            # 初始化損益為 0（後續會自動計算）
+            realized_pnl = 0
+
+            # 構建交易資料
+            trade_data = {
+                'datetime': str(row[COLUMN_MAPPING['datetime']]),
+                'symbol': symbol,
+                'action': action,
+                'quantity': quantity,
+                'price': price,
+                'commission': commission,
+                'realized_pnl': realized_pnl,  # 先設為 0，後續計算
+                'instrument_type': parsed['instrument_type'],
+                'underlying': parsed['underlying'],
+                'strike': parsed['strike'],
+                'expiry': parsed['expiry'],
+                'option_type': parsed['option_type'],
+                'multiplier': parsed['multiplier']
+            }
+
+            # 儲存交易資料（用於策略識別）
+            all_trades.append(trade_data)
+
+            # 嘗試新增到資料庫
+            if db.add_trade(trade_data):
+                new_count += 1
+            else:
+                duplicate_count += 1
+
+        except Exception as e:
+            error_count += 1
+            if error_count <= 3:  # 只顯示前 3 個錯誤
+                st.warning(f"第 {idx + 1} 筆數據處理失敗：{str(e)}")
+
+    # 清除進度指示
+    progress_bar.empty()
+    status_text.empty()
+    
+    # --- 觸發 PnL 重新計算 ---
+    # 無論是否有新資料，都執行一次重算，以確保所有交易損益正確 (例如程式碼邏輯更新後)
+    # if new_count > 0: (移除條件限制)
+    status_text.text("🔄 正在重新計算已實現盈虧 (FIFO)...")
+    pnl_calc = PnLCalculator(db)
+    pnl_calc.recalculate_all()
+    status_text.empty()
+    if new_count > 0:
+        st.toast("✅ 盈虧計算完成！")
+
+    # 顯示結果
+    st.toast(f"✅ 匯入完成！新增 {new_count} 筆，重複 {duplicate_count} 筆")
+
+    if error_count > 0:
+        st.warning(f"⚠️ 有 {error_count} 筆數據無法匯入，請檢查 CSV 格式")
+
+    # 選擇權策略識別 (僅在手動上傳時顯示詳細識別結果，自動匯入模式下保持安靜)
+    if source_name == "手動上傳":
+        st.markdown("---")
+        st.subheader("🎯 選擇權策略識別")
+
+        with st.spinner("正在分析選擇權組合策略..."):
+            strategies = OptionStrategyDetector.detect_strategies(all_trades, time_window_minutes=5)
+
+        if strategies:
+            st.success(f"✅ 識別出 {len(strategies)} 個選擇權策略組合")
+        else:
+            st.info("ℹ️ 未識別出標準選擇權策略組合。")
+
+
+def render_dashboard(db):
+    """渲染主儀表板"""
+    # 初始化 AI 教練
+    try:
+        ai_coach = AICoach()
+    except Exception as e:
+        st.error(f"AI 初始化失敗 (請檢查 API Key): {e}")
+        ai_coach = None
+
+    # 側邊欄提示
+    st.sidebar.markdown("---")
+    st.sidebar.info("🧠 **需要總體倉位建議？**\n\n請前往 **Portfolio Advisor** 頁面，AI 將為您的投資組合提供風險評估與避險策略。")
+    st.sidebar.markdown("---")
+
+    # 1. 獲取數據
+    stats = db.get_trade_statistics()
+    pnl_by_symbol = db.get_pnl_by_symbol()
+    trades = db.get_trades()
+    
+    if not trades:
+        st.info("尚無交易數據，請先匯入 CSV")
+        return
+
+
+    # 2. 頂部卡片 - 動態篩選
+    st.markdown("### 📊 核心標的動態")
+    
+    # 篩選模式選擇（改用下拉選單）
+    col_filter, col_action = st.columns([3, 1])
+    with col_filter:
+        filter_mode = st.selectbox(
+            "排序模式",
+            ["🚀 最近交易", "💰 獲利最高", "💸 虧損最多", "🔥 交易最頻繁"],
+            index=0
+        )
+    
+    with col_action:
+        st.write("") # Spacer
+        st.write("") # Spacer
+        if st.button("⚡ 全局分析", help="一次分析所有持倉的點位建議", use_container_width=True):
+            with st.spinner("正在批量分析所有持倉..."):
+                try:
+                    # 1. 準備數據
+                    positions_data = []
+                    # 使用所有有交易紀錄的標的進行分析，而不僅僅是篩選後的
+                    symbols_to_fetch = list(pnl_by_symbol.keys())
+                    
+                    if not symbols_to_fetch:
+                        st.warning("無持倉可分析")
+                    else:
+                        # 批量抓取數據
+                        batch_data = yf.download(symbols_to_fetch, period="1mo", progress=False)
+                        
+                        for symbol in symbols_to_fetch:
+                            # 計算持倉成本
+                            symbol_trades = [t for t in trades if t['symbol'] == symbol]
+                            buy_trades = [t for t in symbol_trades if t['action'] == 'BUY']
+                            total_qty = sum(t['quantity'] for t in buy_trades)
+                            total_cost = sum(t['quantity'] * t['price'] for t in buy_trades)
+                            avg_cost = (total_cost / total_qty) if total_qty > 0 else 0
+                            current_pos = sum(t['quantity'] if t['action'] == 'BUY' else -t['quantity'] for t in symbol_trades)
+                            
+                            # 獲取市場數據 (處理多層索引或單層索引)
+                            try:
+                                if len(symbols_to_fetch) == 1:
+                                    closes = batch_data['Close']
+                                else:
+                                    closes = batch_data['Close'][symbol]
+                                
+                                current_price = closes.iloc[-1]
+                                # 簡單趨勢描述
+                                trend_str = f"Last 5 days: {closes.tail(5).tolist()}"
+                                
+                                positions_data.append({
+                                    'symbol': symbol,
+                                    'current_price': float(current_price),
+                                    'avg_cost': float(avg_cost),
+                                    'position_size': int(current_pos),
+                                    'market_context': trend_str
+                                })
+                            except Exception as e:
+                                print(f"Error processing {symbol}: {e}")
+                        
+                        # 2. 呼叫 AI
+                        if positions_data:
+                            batch_advice = ai_coach.get_batch_scaling_advice(positions_data)
+                            
+                            # 3. 存入 Session
+                            for symbol, advice in batch_advice.items():
+                                st.session_state[f"ai_scaling_{symbol}"] = advice
+                            
+                            st.success("✅ 分析完成！")
+                            st.rerun()
+                            
+                except Exception as e:
+                    st.error(f"批量分析失敗: {e}")
+    
+    # 準備基礎數據
+    symbol_last_trade = {}
+    symbol_trade_count = {}
+    for t in trades:
+        sym = t['symbol']
+        dt = pd.to_datetime(t['datetime'])
+        if sym not in symbol_last_trade or dt > symbol_last_trade[sym]:
+            symbol_last_trade[sym] = dt
+        symbol_trade_count[sym] = symbol_trade_count.get(sym, 0) + 1
+            
+    # 根據模式排序
+    if "獲利最高" in filter_mode:
+        # 按 PnL 降序
+        sorted_items = sorted(pnl_by_symbol.items(), key=lambda x: x[1], reverse=True)
+    elif "虧損最多" in filter_mode:
+        # 按 PnL 升序
+        sorted_items = sorted(pnl_by_symbol.items(), key=lambda x: x[1])
+    elif "交易最頻繁" in filter_mode:
+        # 按交易次數降序
+        sorted_items = sorted(symbol_trade_count.items(), key=lambda x: x[1], reverse=True)
+        # 轉換格式以匹配後續邏輯 (symbol, value) -> 我們只需要 symbol
+        sorted_items = [(s, 0) for s, _ in sorted_items] # value 不重要，後續會重抓
+    else: # 最近交易 (預設)
+        sorted_items = sorted(symbol_last_trade.items(), key=lambda x: x[1], reverse=True)
+
+    # 取前 4 名
+    target_symbols = [item[0] for item in sorted_items[:4]]
+
+    # 定義 dialog 函數 (必須在 loop 之前定義)
+    @st.dialog(f"交易詳情", width="large")
+    def show_trade_details(symbol, pnl, symbol_trades):
+        # 計算統計
+        win_count = sum(1 for t in symbol_trades if t['realized_pnl'] > 0)
+        total_count = len(symbol_trades)
+        win_rate = (win_count / total_count * 100) if total_count > 0 else 0
+        
+        # 標題區域
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            delta_color = "normal" if pnl >= 0 else "inverse"
+            st.metric("總盈虧", f"${pnl:,.2f}", delta=f"{pnl:+,.0f}", delta_color=delta_color)
+        with col2:
+            st.metric("交易次數", total_count)
+        with col3:
+            st.metric("勝率", f"{win_rate:.1f}%", delta=f"{win_count}勝/{total_count-win_count}敗")
+        
+        st.divider()
+        
+        # 詳細交易記錄
+        st.subheader("📋 交易記錄")
+        symbol_df = pd.DataFrame(symbol_trades)
+        symbol_df['datetime'] = pd.to_datetime(symbol_df['datetime'])
+        symbol_df = symbol_df.sort_values('datetime', ascending=False)  # 最新的在最上面
+        
+        display_df = symbol_df[['datetime', 'action', 'quantity', 'price', 'realized_pnl']].copy()
+        display_df.columns = ['日期時間', '動作', '數量', '價格', '已實現盈虧']
+        
+        st.dataframe(
+            display_df.style.format({
+                '價格': '${:.2f}',
+                '已實現盈虧': '${:.2f}'
+            }).background_gradient(subset=['已實現盈虧'], cmap='RdYlGn'),
+            use_container_width=True,
+            height=400
+        )
+    
+    # 顯示卡片 (改為 2 欄佈局，使其更寬大)
+    # 我們要顯示 4 張卡片，所以是 2x2 的網格
+    
+    # 定義卡片渲染邏輯 (閉包)
+    def render_card_content(symbol, col):
+        with col:
+            # 使用 container(border=True) 創建卡片視覺
+            with st.container(border=True):
+                symbol_trades = [t for t in trades if t['symbol'] == symbol]
+                pnl = pnl_by_symbol.get(symbol, 0)
+                total_count = len(symbol_trades)
+                
+                # 獲取最後交易時間
+                last_trade_time = symbol_last_trade.get(symbol, datetime.now())
+                
+                # 計算勝率
+                win_count = sum(1 for t in symbol_trades if t['realized_pnl'] > 0)
+                win_rate = (win_count / total_count * 100) if total_count > 0 else 0
+                
+                # 計算時間標籤
+                days_diff = (datetime.now() - last_trade_time).days
+                if days_diff == 0:
+                    time_str = "Today"
+                elif days_diff == 1:
+                    time_str = "Yesterday"
+                else:
+                    time_str = last_trade_time.strftime('%m/%d')
+
+                # 卡片頭部：標的 + 時間
+                col_head1, col_head2 = st.columns([2, 1])
+                with col_head1:
+                    st.markdown(f"**{symbol}**")
+                with col_head2:
+                    st.caption(f"🕒 {time_str}")
+                
+                # 卡片核心：盈虧大數字
+                st.metric(
+                    label="總盈虧",
+                    value=f"${pnl:,.0f}",
+                    delta=f"{win_rate:.0f}% Win ({total_count}筆)",
+                    delta_color="normal" if pnl >= 0 else "inverse"
+                )
+                
+                # 卡片底部：操作按鈕與 AI 分析
+                col_btn1, col_btn2 = st.columns([1, 1])
+                
+                with col_btn1:
+                    if st.button("查看詳情", key=f"btn_{symbol}", use_container_width=True):
+                        show_trade_details(symbol, pnl, symbol_trades)
+                
+                with col_btn2:
+                    # AI 點位分析按鈕邏輯
+                    ai_key = f"ai_scaling_{symbol}"
+                    
+                    if ai_key in st.session_state:
+                        # 如果已有分析結果，顯示清除按鈕（或重新分析）
+                        if st.button("🔄 更新分析", key=f"btn_ai_{symbol}", use_container_width=True):
+                            del st.session_state[ai_key]
+                            st.rerun()
+                    else:
+                        if st.button("⚡ AI 點位", key=f"btn_ai_{symbol}", use_container_width=True):
+                            with st.spinner("AI 正在計算最佳點位..."):
+                                try:
+                                    # 1. 計算平均成本與持倉
+                                    buy_trades = [t for t in symbol_trades if t['action'] == 'BUY']
+                                    total_qty = sum(t['quantity'] for t in buy_trades)
+                                    total_cost = sum(t['quantity'] * t['price'] for t in buy_trades)
+                                    avg_cost = (total_cost / total_qty) if total_qty > 0 else 0
+                                    current_pos = sum(t['quantity'] if t['action'] == 'BUY' else -t['quantity'] for t in symbol_trades)
+                                    
+                                    # 2. 抓取即時數據
+                                    ticker = yf.Ticker(symbol)
+                                    hist = ticker.history(period="1mo")
+                                    current_price = hist['Close'].iloc[-1]
+                                    market_str = hist.tail(5).to_string()
+                                    
+                                    # 3. 呼叫 AI
+                                    advice = ai_coach.get_scaling_advice(
+                                        symbol, current_price, avg_cost, current_pos, market_str
+                                    )
+                                    st.session_state[ai_key] = advice
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"分析失敗: {e}")
+
+                # 顯示 AI 建議結果 (如果有)
+                if f"ai_scaling_{symbol}" in st.session_state:
+                    advice = st.session_state[f"ai_scaling_{symbol}"]
+                    st.markdown("---")
+                    st.caption(f"🤖 AI 策略 ({advice.get('reasoning', '')})")
+                    
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        st.metric("加倉點", f"${advice.get('add_price', 'N/A')}", delta="Buy Zone", delta_color="normal")
+                    with c2:
+                        st.metric("停利點", f"${advice.get('target_price', 'N/A')}", delta="Target", delta_color="normal")
+                    with c3:
+                        st.metric("停損點", f"${advice.get('stop_loss', 'N/A')}", delta="Stop", delta_color="inverse")
+
+    # 第一列
+    cols1 = st.columns(2)
+    for i in range(2):
+        if i < len(target_symbols):
+            render_card_content(target_symbols[i], cols1[i])
+    
+    # 第二列
+    if len(target_symbols) > 2:
+        cols2 = st.columns(2)
+        for i in range(2):
+            idx = i + 2
+            if idx < len(target_symbols):
+                render_card_content(target_symbols[idx], cols2[i])
+
+    # 3. 中間區域：資金曲線 (佔滿全寬)
+    st.markdown("### 📈 累計盈虧曲線")
+    
+    # 修復：直接在前端計算資金曲線，不依賴 DB 方法
+    if trades:
+        df_trades = pd.DataFrame(trades)
+        df_trades['datetime'] = pd.to_datetime(df_trades['datetime'])
+        df_trades = df_trades.sort_values('datetime')
+        df_trades['cumulative_pnl'] = df_trades['realized_pnl'].cumsum()
+        
+        # 繪製資金曲線
+        fig = go.Figure()
+        
+        # 累計盈虧線
+        fig.add_trace(go.Scatter(
+            x=df_trades['datetime'],
+            y=df_trades['cumulative_pnl'],
+            mode='lines',
+            name='累計盈虧',
+            line=dict(color='#3B82F6', width=3),
+            fill='tozeroy',
+            fillcolor='rgba(59, 130, 246, 0.1)'
+        ))
+        
+        # 標記最高點
+        max_pnl = df_trades['cumulative_pnl'].max()
+        max_idx = df_trades['cumulative_pnl'].idxmax()
+        max_date = df_trades.loc[max_idx, 'datetime']
+        
+        fig.add_trace(go.Scatter(
+            x=[max_date],
+            y=[max_pnl],
+            mode='markers+text',
+            name='最高點',
+            marker=dict(color='#10B981', size=10, symbol='star'),
+            text=[f'最高 ${max_pnl:,.0f}'],
+            textposition="top center"
+        ))
+        
+        fig.update_layout(
+            margin=dict(l=0, r=0, t=30, b=0),
+            height=400,
+            xaxis=dict(
+                title="",
+                showgrid=True,
+                gridwidth=1,
+                gridcolor='#E5E7EB',
+                showline=True,
+                linewidth=2,
+                linecolor='#D1D5DB'
+            ),
+            yaxis=dict(
+                title="累計損益 ($)",
+                showgrid=True,
+                gridwidth=1,
+                gridcolor='#E5E7EB',
+                showline=True,
+                linewidth=2,
+                linecolor='#D1D5DB',
+                zeroline=True,
+                zerolinewidth=2,
+                zerolinecolor='#9CA3AF'
+            ),
+            hovermode="x unified",
+            showlegend=False,
+            paper_bgcolor='white',
+            plot_bgcolor='#F9FAFB',  # 淺灰背景
+            font=dict(
+                family="Inter, system-ui, -apple-system, sans-serif",
+                size=12,
+                color='#374151'
+            )
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("尚無足夠數據繪製資金曲線")
+
+# --- 主程式區 (Main Execution) ---
+
 # 主標題
 st.title("📊 AI 交易日誌系統")
-st.markdown("---")
 
-# 歡迎訊息
-st.markdown("""
-### 歡迎使用 AI 交易日誌系統
-
-這是一個結合數據分析與 AI 教練的交易檢討工具。你可以：
-
-- 📤 **上傳交易紀錄**：匯入 IBKR CSV 報表
-- 📈 **檢討交易**：與 AI 教練對話，深度分析每筆交易
-- 🎯 **策略模擬**：What-if 情境分析與選擇權策略建議
-- 📊 **績效分析**：長期績效追蹤與改進建議
-
-請先上傳你的交易報表開始使用。
-""")
-
-st.markdown("---")
-
-# 檢查是否設定自動匯入路徑
+# 檢查自動匯入設定 (優先使用 Google Sheet URL)
+google_sheet_url = os.getenv('GOOGLE_SHEET_URL', '').strip()
 auto_csv_path = os.getenv('AUTO_IMPORT_CSV_PATH', '').strip()
 
-df = None
-data_source = None
+# 決定匯入來源
+import_source = None
+source_type = None
+
+if google_sheet_url:
+    import_source = google_sheet_url
+    source_type = 'url'
+elif auto_csv_path and Path(auto_csv_path).exists():
+    import_source = auto_csv_path
+    source_type = 'local'
 
 # 自動載入模式
-if auto_csv_path and Path(auto_csv_path).exists():
-    st.header("📥 自動 CSV 匯入")
+if import_source:
+    # 儀表板標題
+    st.markdown("## 📝 交易紀錄")
 
-    file_info = Path(auto_csv_path)
-    st.success(f"✅ 已設定自動匯入：`{auto_csv_path}`")
+    # 狀態列 (Status Bar)
+    status_col1, status_col2 = st.columns([3, 1])
+    with status_col1:
+        if source_type == 'url':
+            st.caption(f"📡 自動匯入來源: Google Sheet (雲端連結)")
+        else:
+            st.caption(f"📡 自動匯入來源: `{import_source}`")
+            
+    with status_col2:
+        # 手動重載按鈕 (小型化)
+        if st.button("🔄 重新整理", type="secondary", use_container_width=True):
+            st.session_state['last_import_time'] = 0 # 強制觸發更新
+            st.rerun()
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("檔案名稱", file_info.name)
-    with col2:
-        file_size_mb = file_info.stat().st_size / 1024 / 1024
-        st.metric("檔案大小", f"{file_size_mb:.2f} MB")
-    with col3:
-        mod_time = datetime.fromtimestamp(file_info.stat().st_mtime)
-        st.metric("最後更新", mod_time.strftime('%Y-%m-%d %H:%M'))
+    # 檢查是否需要自動載入（基於內容 hash，避免重複匯入）
+    should_auto_load = False
+    current_time = datetime.now().timestamp()
+    last_import_time = st.session_state.get('last_import_time', 0)
+    last_content_hash = st.session_state.get('last_content_hash', '')
 
-    if st.button("🔄 重新載入 CSV", type="primary"):
+    # 計算當前內容 hash
+    try:
+        df_preview = pd.read_csv(import_source)
+        # 使用前 1000 行的內容生成 hash（避免大檔案效能問題）
+        content_sample = df_preview.head(1000).to_csv(index=False)
+        current_content_hash = hashlib.md5(content_sample.encode()).hexdigest()
+
+        # 比較 hash，只有內容改變才重新匯入
+        if current_content_hash != last_content_hash:
+            should_auto_load = True
+            st.session_state['last_content_hash'] = current_content_hash
+            st.session_state['last_import_time'] = current_time
+    except Exception as e:
+        st.warning(f"無法讀取資料來源：{str(e)}")
+    
+    # 執行載入邏輯
+    if should_auto_load:
         try:
-            df = pd.read_csv(auto_csv_path)
-            data_source = "auto"
-            st.success(f"✅ 成功載入 {len(df)} 筆記錄")
+            # 使用已經讀取的 df_preview
+            if 'df_preview' in locals() and len(df_preview) > 0:
+                with st.spinner(f"檢測到新資料，正在匯入..."):
+                    # 顯示本次匯入資訊
+                    st.info(f"📊 發現 {len(df_preview)} 筆交易記錄")
+                    process_and_import_csv(df_preview, source_name="自動載入")
+                    st.success(f"✅ 匯入完成（避免重複：已使用內容 hash 檢查）")
         except Exception as e:
-            st.error(f"❌ 載入失敗：{str(e)}")
+            st.error(f"❌ 自動匯入失敗：{str(e)}")
+    else:
+        # 顯示已同步訊息
+        if last_content_hash:
+            st.caption("✅ 資料已是最新，無需重新匯入")
+    
+    # 渲染儀表板
+    render_dashboard(db)
 
-    st.info("""
-    **自動匯入模式已啟用**
-    - 系統會從 `.env` 設定的路徑自動載入 CSV
-    - 點擊「重新載入 CSV」更新資料
-    - 如需手動上傳，請移除 `.env` 中的 `AUTO_IMPORT_CSV_PATH` 設定
-    """)
+    st.markdown("---")
+    # 顯示詳細數據開關
+    with st.expander("📂 查看原始檔案詳情與數據"):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if source_type == 'url':
+                st.metric("來源類型", "Google Sheet")
+            else:
+                st.metric("檔案名稱", Path(import_source).name)
+        with col2:
+            if source_type == 'local':
+                file_size_mb = Path(import_source).stat().st_size / 1024 / 1024
+                st.metric("檔案大小", f"{file_size_mb:.2f} MB")
+            else:
+                st.metric("連線狀態", "線上")
+        with col3:
+            if source_type == 'local':
+                mod_time = datetime.fromtimestamp(Path(import_source).stat().st_mtime)
+                st.metric("檔案最後更新", mod_time.strftime('%Y-%m-%d %H:%M'))
+            else:
+                update_time = datetime.fromtimestamp(st.session_state.get('last_import_time', 0))
+                st.metric("上次同步時間", update_time.strftime('%Y-%m-%d %H:%M'))
+            
+        if should_auto_load and 'df' in locals() and len(df) > 0:
+             st.dataframe(df.head(10), use_container_width=True)
+
+             
+    # 將歡迎訊息移至下方折疊區
+    with st.expander("ℹ️ 系統說明與功能介紹"):
+        st.markdown("""
+        ### 歡迎使用 AI 交易日誌系統
+        
+        這是一個結合數據分析與 AI 教練的交易檢討工具。你可以：
+        
+        - 📤 **上傳交易紀錄**：匯入 IBKR CSV 報表
+        - 📈 **檢討交易**：與 AI 教練對話，深度分析每筆交易
+        - 🎯 **策略模擬**：What-if 情境分析與選擇權策略建議
+        - 📊 **績效分析**：長期績效追蹤與改進建議
+        """)
 
 # 手動上傳模式
 else:
+    st.markdown("---")
+    
+    # 歡迎訊息
+    st.markdown("""
+    ### 歡迎使用 AI 交易日誌系統
+    
+    這是一個結合數據分析與 AI 教練的交易檢討工具。你可以：
+    
+    - 📤 **上傳交易紀錄**：匯入 IBKR CSV 報表
+    - 📈 **檢討交易**：與 AI 教練對話，深度分析每筆交易
+    - 🎯 **策略模擬**：What-if 情境分析與選擇權策略建議
+    - 📊 **績效分析**：長期績效追蹤與改進建議
+    
+    請先上傳你的交易報表開始使用。
+    """)
+    
+    st.markdown("---")
+    
     st.header("📤 上傳 IBKR 交易報表")
 
-    st.info("""
+    st.info(f"""
     **CSV 檔案格式要求：**
-    - 必須包含欄位：`Date`、`Symbol`、`Side`、`Quantity`、`Price`
-    - 可選欄位：`Commission`、選擇權欄位（`Strike`、`Expiry`、`Right`）
+    - 必須包含欄位：`{COLUMN_MAPPING['datetime']}`、`{COLUMN_MAPPING['symbol']}`、`{COLUMN_MAPPING['action']}`、`{COLUMN_MAPPING['quantity']}`、`{COLUMN_MAPPING['price']}`
+    - 可選欄位：`{COLUMN_MAPPING['commission']}`、選擇權欄位（`{COLUMN_MAPPING['strike']}`、`{COLUMN_MAPPING['expiry']}`、`{COLUMN_MAPPING['right']}`）
     - **支援來源**：IBKR 官方報表、n8n 自動生成報表
-
-    如果你的 CSV 欄位名稱不同，系統會嘗試自動對應。
+    - **自動計算損益**：系統會根據買賣配對自動計算實現損益
 
     💡 **提示**：如需自動載入，請在 `.env` 設定 `AUTO_IMPORT_CSV_PATH`
     """)
@@ -114,8 +715,6 @@ else:
         try:
             # 讀取 CSV
             df = pd.read_csv(uploaded_file)
-            data_source = "manual"
-
             st.success(f"✅ 成功讀取檔案，共 {len(df)} 筆交易紀錄")
 
             # 資料驗證
@@ -123,185 +722,16 @@ else:
                 st.error("❌ CSV 檔案是空的，請檢查檔案內容")
                 st.stop()
 
-            if len(df.columns) < 5:
-                st.warning(f"⚠️ CSV 只有 {len(df.columns)} 個欄位，可能缺少必要欄位")
+            # 顯示預覽
+            with st.expander("📋 查看原始數據（前 10 筆）", expanded=False):
+                st.dataframe(df.head(10), use_container_width=True)
+
+            # 直接處理並匯入
+            process_and_import_csv(df, source_name="手動上傳")
+
         except Exception as e:
-            st.error(f"❌ 檔案讀取錯誤：{str(e)}")
-            st.stop()
-
-# 共用處理邏輯（自動載入和手動上傳都會執行）
-if df is not None:
-    # 顯示原始數據預覽與統計
-    with st.expander("📋 查看原始數據與統計", expanded=True):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("總筆數", len(df))
-        with col2:
-            st.metric("欄位數", len(df.columns))
-        with col3:
-            # 檢測可能的重複
-            potential_duplicates = df.duplicated().sum()
-            st.metric("可能重複", potential_duplicates)
-
-        st.dataframe(df.head(10), use_container_width=True)
-
-        # 數據品質檢查
-        st.write("**數據品質檢查：**")
-        missing_values = df.isnull().sum()
-        if missing_values.sum() > 0:
-            st.warning(f"發現 {missing_values.sum()} 個空值")
-            st.write(missing_values[missing_values > 0])
-
-    # 欄位對應（自動偵測）
-    st.subheader("🔄 欄位對應")
-
-    # 自動偵測欄位名稱
-    def find_column(possible_names, columns):
-        """根據可能的名稱列表找到對應欄位"""
-        for name in possible_names:
-            for col in columns:
-                if name.lower() in col.lower():
-                    return list(columns).index(col)
-        return 0
-
-    datetime_idx = find_column(['datetime', 'date', 'time'], df.columns)
-    symbol_idx = find_column(['symbol', 'ticker'], df.columns)
-    action_idx = find_column(['action', 'side', 'type'], df.columns)
-    quantity_idx = find_column(['quantity', 'qty', 'amount'], df.columns)
-    price_idx = find_column(['price', 'fill', 'avg'], df.columns)
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.write("**CSV 欄位**")
-        datetime_col = st.selectbox("日期時間欄位", df.columns, index=datetime_idx)
-        symbol_col = st.selectbox("標的代號欄位", df.columns, index=symbol_idx)
-        action_col = st.selectbox("買賣動作欄位", df.columns, index=action_idx)
-
-    with col2:
-        st.write("**對應目標**")
-        quantity_col = st.selectbox("數量欄位", df.columns, index=quantity_idx)
-        price_col = st.selectbox("價格欄位", df.columns, index=price_idx)
-
-        # 可選欄位
-        commission_col = st.selectbox(
-            "手續費欄位（可選）",
-            ['無'] + list(df.columns),
-            index=list(df.columns).index('Commission') + 1 if 'Commission' in df.columns else 0
-        )
-        pnl_col = st.selectbox(
-            "已實現盈虧欄位（可選）",
-            ['無'] + list(df.columns),
-            index=0
-        )
-
-    # 選擇權欄位（如果有的話）
-    st.write("**選擇權欄位（如適用）**")
-    col3, col4 = st.columns(2)
-    with col3:
-        strike_col = st.selectbox(
-            "履約價欄位（可選）",
-            ['無'] + list(df.columns),
-            index=list(df.columns).index('Strike') + 1 if 'Strike' in df.columns else 0
-        )
-        expiry_col = st.selectbox(
-            "到期日欄位（可選）",
-            ['無'] + list(df.columns),
-            index=list(df.columns).index('Expiry') + 1 if 'Expiry' in df.columns else 0
-        )
-    with col4:
-        right_col = st.selectbox(
-            "權利類型欄位（可選）",
-            ['無'] + list(df.columns),
-            index=list(df.columns).index('Right') + 1 if 'Right' in df.columns else 0
-        )
-
-        # 匯入按鈕
-        if st.button("🚀 開始匯入", type="primary"):
-            # 建立進度指示器
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-
-            new_count = 0
-            duplicate_count = 0
-            error_count = 0
-            total = len(df)
-
-            for idx, row in df.iterrows():
-                # 更新進度
-                progress = (idx + 1) / total
-                progress_bar.progress(progress)
-                status_text.text(f"處理中... {idx + 1}/{total} ({progress*100:.1f}%)")
-
-                try:
-                    symbol = str(row[symbol_col]).strip()
-
-                    # 如果有分散的選擇權欄位，先合併成完整符號
-                    if strike_col != '無' and not pd.isna(row[strike_col]) and row[strike_col]:
-                        # 有選擇權資訊，需要合併
-                        underlying = symbol.split()[0]  # 取第一個詞作為標的
-                        strike = str(row[strike_col]).strip()
-                        expiry = str(row[expiry_col]).strip() if expiry_col != '無' else ''
-                        right = str(row[right_col]).strip() if right_col != '無' else ''
-
-                        # 清理到期日格式（移除重複的權利類型）
-                        if right and right in expiry:
-                            expiry = expiry.replace(right, '').strip()
-
-                        # 組合完整符號：例如 "ONDS 251114C8" 或 "ONDS 20251114C8"
-                        if expiry and right:
-                            symbol = f"{underlying} {expiry}{strike}"
-                        elif expiry:
-                            symbol = f"{underlying} {expiry}"
-
-                    # 解析標的類型（股票/選擇權/期貨）
-                    parsed = InstrumentParser.parse_symbol(symbol)
-
-                    trade_data = {
-                        'datetime': str(row[datetime_col]),
-                        'symbol': symbol,
-                        'action': str(row[action_col]).upper(),  # 統一大寫
-                        'quantity': float(row[quantity_col]),
-                        'price': float(row[price_col]),
-                        'commission': float(row[commission_col]) if commission_col != '無' and not pd.isna(row[commission_col]) else 0,
-                        'realized_pnl': float(row[pnl_col]) if pnl_col != '無' and not pd.isna(row[pnl_col]) else 0,
-                        'instrument_type': parsed['instrument_type'],
-                        'underlying': parsed['underlying'],
-                        'strike': parsed['strike'],
-                        'expiry': parsed['expiry'],
-                        'option_type': parsed['option_type'],
-                        'multiplier': parsed['multiplier']
-                    }
-
-                    # 嘗試新增（避免重複）
-                    if db.add_trade(trade_data):
-                        new_count += 1
-                    else:
-                        duplicate_count += 1
-
-                except Exception as e:
-                    error_count += 1
-                    if error_count == 1:  # 只顯示第一個錯誤
-                        st.warning(f"第 {idx + 1} 筆數據處理失敗：{str(e)}")
-
-            # 清除進度指示
-            progress_bar.empty()
-            status_text.empty()
-
-            # 顯示結果
-            st.success(f"✅ 匯入完成！")
-
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("新增交易", f"{new_count} 筆", delta_color="normal")
-            col2.metric("重複交易", f"{duplicate_count} 筆", delta_color="off")
-            col3.metric("錯誤數", f"{error_count} 筆", delta_color="inverse")
-            col4.metric("成功率", f"{(new_count/(new_count+error_count)*100 if new_count+error_count > 0 else 0):.1f}%")
-
-            if error_count > 0:
-                st.warning(f"⚠️ 有 {error_count} 筆數據無法匯入，請檢查 CSV 格式")
-
-            st.balloons()
-
+            st.error(f"❌ 檔案處理錯誤：{str(e)}")
+            st.info("請確認 CSV 檔案格式正確，或聯繫技術支援。")
 
 # 側邊欄：系統狀態
 with st.sidebar:
@@ -315,6 +745,31 @@ with st.sidebar:
     st.metric("交易標的數", len(symbols))
     st.metric("總盈虧", f"${stats.get('total_pnl', 0):,.2f}")
 
+    # 自動檢查是否需要重算 PnL (若有交易但總盈虧為 0)
+    if stats.get('total_trades', 0) > 0 and stats.get('total_pnl', 0) == 0:
+        if 'pnl_recalc_done' not in st.session_state:
+            st.toast("🔄 檢測到盈虧數據未初始化，正在重新計算...")
+            pnl_calc = PnLCalculator(db)
+            pnl_calc.recalculate_all()
+            st.session_state['pnl_recalc_done'] = True
+            st.rerun()
+
+    st.markdown("---")
+    
+    # 手動維護工具
+    with st.expander("🔧 資料庫維護"):
+        if st.button("🔄 強制重算所有盈虧", use_container_width=True):
+            with st.spinner("正在重新計算所有交易盈虧..."):
+                pnl_calc = PnLCalculator(db)
+                pnl_calc.recalculate_all()
+            st.success("✅ 重算完成！")
+            st.rerun()
+        
+        if st.button("🗑️ 清空資料庫", type="primary", use_container_width=True):
+            if db.clear_database():
+                st.success("✅ 資料庫已清空")
+                st.rerun()
+
     st.markdown("---")
 
     st.markdown("""
@@ -325,9 +780,10 @@ with st.sidebar:
     - [📊 績效成績單](pages/3_Report_Card.py)
     - [🔬 策略回測 (Core)](pages/4_Strategy_Lab.py)
     - [💡 選擇權顧問](pages/5_Options_Strategy.py)
+    - [🤖 投資組合 AI 顧問](pages/6_Portfolio_Advisor.py)
     - [🃏 錯誤卡片](pages/7_Mistake_Cards.py)
     """)
 
     st.markdown("---")
 
-    st.caption("💡 提示：先上傳交易報表，然後前往各功能頁面進行分析。")
+    st.caption("💡 提示：上傳交易報表後，系統會自動處理並匯入資料。")

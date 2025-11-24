@@ -30,7 +30,8 @@ class AICoach:
             raise ValueError("請提供 GEMINI_API_KEY 環境變數或直接傳入 API Key")
 
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        # 使用最新的 Gemini 3.0 Pro Preview 模型
+        self.model = genai.GenerativeModel('gemini-3-pro-preview')
 
     def start_review_session(self,
                              analysis_context: str,
@@ -272,3 +273,125 @@ class AICoach:
         except Exception as e:
             print(f"Error parsing mistakes: {e}")
             return []
+
+    def get_scaling_advice(self, symbol: str, current_price: float, avg_cost: float, position_size: int, market_data_str: str) -> Dict[str, Any]:
+        """
+        分析分批建倉與風險管理點位
+        """
+        prompt = f"""
+        Role: Senior Quantitative Trader
+        Task: Analyze {symbol} for scaling-in (adding position) and risk management.
+        
+        Current Market Data:
+        - Symbol: {symbol}
+        - Current Price: ${current_price}
+        - My Avg Cost: ${avg_cost}
+        - Position Size: {position_size}
+        
+        Recent Price Action:
+        {market_data_str}
+        
+        Based on Technical Analysis (Support/Resistance, Volatility, Trend):
+        1. Identify the best PRICE LEVEL to ADD to the position (Scale In).
+        2. Identify the best PRICE LEVEL to TAKE PROFIT (Target).
+        3. Identify the STOP LOSS level.
+        
+        Output strictly in JSON format (no markdown, no other text):
+        {{
+            "add_price": "price value (number only)",
+            "target_price": "price value (number only)",
+            "stop_loss": "price value (number only)",
+            "reasoning": "Very brief strategy (max 15 words)"
+        }}
+        """
+        
+        try:
+            response = self.model.generate_content(prompt)
+            text = response.text.strip()
+            # 移除可能的 markdown 標記
+            if text.startswith("```json"):
+                text = text[7:-3]
+            elif text.startswith("```"):
+                text = text[3:-3]
+            import json
+            return json.loads(text.strip())
+        except Exception as e:
+            print(f"AI Scaling Advice Error: {e}")
+            return {
+                "add_price": "N/A",
+                "target_price": "N/A",
+                "stop_loss": "N/A",
+                "reasoning": "Analysis failed"
+            }
+
+    def get_batch_scaling_advice(self, positions_data: list) -> dict:
+        """
+        批量分析多個標的的點位建議 (節省 Token)
+        positions_data: list of dicts [{'symbol':..., 'current_price':..., 'avg_cost':..., 'position_size':..., 'market_context':...}]
+        """
+        import json
+        
+        # 簡化數據以減少 Token (移除過於詳細的歷史數據，只保留摘要)
+        prompt_data = []
+        for p in positions_data:
+            prompt_data.append({
+                "symbol": p['symbol'],
+                "price": p['current_price'],
+                "cost": p['avg_cost'],
+                "pos": p['position_size'],
+                "trend": p['market_context'][-100:] # 只取最後 100 字元作為趨勢摘要
+            })
+            
+        data_str = json.dumps(prompt_data, indent=2)
+        
+        prompt = f"""
+        Role: Senior Quantitative Trader
+        Task: Analyze multiple positions for scaling-in and risk management.
+        
+        Positions Data:
+        {data_str}
+        
+        For EACH position, based on Technical Analysis:
+        1. Best PRICE to ADD (Scale In).
+        2. Best PRICE to TAKE PROFIT (Target).
+        3. STOP LOSS level.
+        
+        Output strictly in JSON format (key = symbol):
+        {{
+            "SYMBOL1": {{
+                "add_price": "price (number)",
+                "target_price": "price (number)",
+                "stop_loss": "price (number)",
+                "reasoning": "brief strategy (max 10 words)"
+            }},
+            ...
+        }}
+        """
+        
+        try:
+            response = self.model.generate_content(prompt)
+            text = response.text.strip()
+            if text.startswith("```json"):
+                text = text[7:-3]
+            elif text.startswith("```"):
+                text = text[3:-3]
+            return json.loads(text.strip())
+        except Exception as e:
+            print(f"Batch AI Advice Error: {e}")
+            return {}
+
+    def chat(self, prompt: str) -> str:
+        """
+        通用對話方法
+        
+        Args:
+            prompt: 提示詞
+            
+        Returns:
+            AI 回應
+        """
+        try:
+            response = self.model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            return f"AI 分析發生錯誤: {str(e)}"

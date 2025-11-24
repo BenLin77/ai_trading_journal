@@ -8,12 +8,12 @@ __pycache__/
 *.so
 .Python
 .venv/
+env/
 venv/
 ENV/
-env/
 
 # Database
-*.db
+# *.db (moved to Project specific)
 *.sqlite
 *.sqlite3
 
@@ -22,10 +22,28 @@ env/
 .idea/
 *.swp
 *.swo
+# *~ (moved to Temporary files)
+.DS_Store
+
+# Project specific
+.env
+*.db
+*.csv
+*.log
+
+# Testing
+htmlcov/
+.coverage
+.pytest_cache/
+.tox/
+
+# Temporary files
+temp_*/
+*.tmp
 *~
 
 # OS
-.DS_Store
+# .DS_Store (moved to IDE, but also kept here as per instruction)
 Thumbs.db
 .directory
 

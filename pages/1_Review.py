@@ -94,7 +94,7 @@ with st.sidebar:
     interval = st.selectbox(
         "K 線週期",
         ['1m', '5m', '15m', '30m', '1h', '1d'],
-        index=1,
+        index=5,
         help="選擇 K 線的時間週期"
     )
 
@@ -159,9 +159,28 @@ if load_button:
             """)
             st.stop()
 
-        # 重置索引並重命名欄位
+        # 重置索引並重命名欄位（動態處理，避免列數不匹配）
         ohlc_df = ohlc_df.reset_index()
-        ohlc_df.columns = ['datetime', 'open', 'high', 'low', 'close', 'volume']
+        
+        # 確保有必要的欄位
+        required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+        if not all(col in ohlc_df.columns for col in required_columns):
+            st.error(f"數據缺少必要欄位。可用欄位：{list(ohlc_df.columns)}")
+            st.stop()
+        
+        # 重新命名為小寫（統一格式）
+        column_mapping = {
+            'Date': 'datetime',
+            'Open': 'open',
+            'High': 'high',
+            'Low': 'low',
+            'Close': 'close',
+            'Volume': 'volume'
+        }
+        ohlc_df = ohlc_df.rename(columns=column_mapping)
+        
+        # 只保留需要的欄位
+        ohlc_df = ohlc_df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
 
     except Exception as e:
         progress_bar.empty()
@@ -307,64 +326,76 @@ if load_button:
     if ai_coach is None:
         st.info("AI 對話功能需要設定 GEMINI_API_KEY")
     else:
-        # 生成會話 ID
+        # 檢查是否切換了標的，如果是則重置對話
+        if st.session_state.get('last_review_symbol') != selected_symbol:
+            st.session_state.last_review_symbol = selected_symbol
+            st.session_state.chat_messages = []
+            # 清除舊的 session_id 以便生成新的
+            if 'session_id' in st.session_state:
+                del st.session_state.session_id
+
+        # 生成會話 ID (如果不存在)
         if 'session_id' not in st.session_state:
             st.session_state.session_id = f"{selected_symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-        # 初始化對話
-        if 'chat_messages' not in st.session_state:
-            st.session_state.chat_messages = []
+        # 初始化對話 (如果為空)
+        if not st.session_state.chat_messages:
+            with st.spinner("AI 教練正在分析交易數據..."):
+                # AI 首次提問
+                analysis_context = analyzer.generate_ai_prompt_context(issues)
 
-            # AI 首次提問
-            analysis_context = analyzer.generate_ai_prompt_context(issues)
+                # 加入衍生品資訊到摘要
+                if is_derivative:
+                    instrument_info = f"{parsed_symbol['instrument_type'].upper()}: {selected_symbol}"
+                    if parsed_symbol['instrument_type'] == 'option':
+                        instrument_info += f" (Strike ${parsed_symbol['strike']}, {parsed_symbol['option_type']})"
+                    trade_summary = f"{len(trades_df)} 筆{parsed_symbol['instrument_type']}交易，總盈虧：${trades_df['realized_pnl'].sum():.2f}"
+                else:
+                    instrument_info = f"股票: {selected_symbol}"
+                    trade_summary = f"{len(trades_df)} 筆交易，總盈虧：${trades_df['realized_pnl'].sum():.2f}"
 
-            # 加入衍生品資訊到摘要
-            if is_derivative:
-                instrument_info = f"{parsed_symbol['instrument_type'].upper()}: {selected_symbol}"
-                if parsed_symbol['instrument_type'] == 'option':
-                    instrument_info += f" (Strike ${parsed_symbol['strike']}, {parsed_symbol['option_type']})"
-                trade_summary = f"{len(trades_df)} 筆{parsed_symbol['instrument_type']}交易，總盈虧：${trades_df['realized_pnl'].sum():.2f}"
-            else:
-                instrument_info = f"股票: {selected_symbol}"
-                trade_summary = f"{len(trades_df)} 筆交易，總盈虧：${trades_df['realized_pnl'].sum():.2f}"
+                ohlc_summary = f"K 線數據：{len(ohlc_df)} 根，週期 {interval}"
 
-            ohlc_summary = f"K 線數據：{len(ohlc_df)} 根，週期 {interval}"
+                # 取得過去的記憶 (Long-term Memory)
+                try:
+                    global_history = db.get_global_chat_history(limit=30)
+                    formatted_history = ""
+                    if global_history:
+                        formatted_history = "--- 過去對話紀錄 ---\n"
+                        for msg in global_history:
+                            role = "User" if msg['role'] == 'user' else "AI Coach"
+                            formatted_history += f"{role}: {msg['content']}\n"
+                        formatted_history += "--- 紀錄結束 ---\n"
+                except Exception:
+                    formatted_history = ""
 
-            # 取得過去的記憶 (Long-term Memory)
-            try:
-                global_history = db.get_global_chat_history(limit=30)
-                formatted_history = ""
-                if global_history:
-                    formatted_history = "--- 過去對話紀錄 ---\n"
-                    for msg in global_history:
-                        role = "User" if msg['role'] == 'user' else "AI Coach"
-                        formatted_history += f"{role}: {msg['content']}\n"
-                    formatted_history += "--- 紀錄結束 ---\n"
-            except Exception:
-                formatted_history = ""
+                try:
+                    ai_first_message = ai_coach.start_review_session(
+                        analysis_context=analysis_context,
+                        trade_data=trade_summary,
+                        ohlc_summary=ohlc_summary,
+                        global_context=formatted_history
+                    )
 
-            try:
-                ai_first_message = ai_coach.start_review_session(
-                    analysis_context=analysis_context,
-                    trade_data=trade_summary,
-                    ohlc_summary=ohlc_summary,
-                    global_context=formatted_history
-                )
+                    st.session_state.chat_messages.append({
+                        'role': 'assistant',
+                        'content': ai_first_message
+                    })
 
-                st.session_state.chat_messages.append({
-                    'role': 'assistant',
-                    'content': ai_first_message
-                })
+                    # 儲存到資料庫
+                    db.add_chat_message(
+                        session_id=st.session_state.session_id,
+                        role='assistant',
+                        content=ai_first_message
+                    )
 
-                # 儲存到資料庫
-                db.add_chat_message(
-                    session_id=st.session_state.session_id,
-                    role='assistant',
-                    content=ai_first_message
-                )
-
-            except Exception as e:
-                st.error(f"AI 初始化失敗：{str(e)}")
+                except Exception as e:
+                    st.error(f"AI 初始化失敗：{str(e)}")
+                    # 即使失敗，也允許用戶手動開始對話
+                    st.session_state.chat_messages.append({
+                        'role': 'assistant',
+                        'content': "抱歉，自動分析暫時無法使用。請直接告訴我你想檢討什麼？"
+                    })
 
         # 顯示對話歷史
         for msg in st.session_state.chat_messages:

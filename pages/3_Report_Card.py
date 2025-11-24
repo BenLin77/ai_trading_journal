@@ -274,12 +274,16 @@ with tab2:
         fig_hour = create_pnl_by_hour_chart(pnl_by_hour)
         st.plotly_chart(fig_hour, use_container_width=True)
 
-        # 找出最差時段
-        worst_hours = sorted(pnl_by_hour.items(), key=lambda x: x[1])[:3]
-
-        st.warning("⚠️ **最差時段（魔鬼時刻）**：")
-        for hour, pnl in worst_hours:
-            st.write(f"- {hour:02d}:00 - {hour+1:02d}:00：${pnl:,.2f}")
+        # 找出最差時段（過濾掉 None 值）
+        valid_hours = {h: p for h, p in pnl_by_hour.items() if h is not None and isinstance(h, (int, float))}
+        if valid_hours:
+            worst_hours = sorted(valid_hours.items(), key=lambda x: x[1])[:3]
+            
+            st.warning("⚠️ **最差時段（應避開）：")
+            for hour, pnl in worst_hours:
+                st.write(f"- {int(hour):02d}:00 - {int(hour)+1:02d}:00：${pnl:,.2f}")
+        else:
+            st.info("無有效時段數據")
     else:
         st.info("無數據")
 

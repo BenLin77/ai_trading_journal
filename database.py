@@ -26,6 +26,7 @@ class TradingDatabase:
         """
         self.db_path = db_path
         self.init_database()
+        self.migrate_database()
         self.init_backtest_tables()
 
     def _get_connection(self) -> sqlite3.Connection:
@@ -33,6 +34,36 @@ class TradingDatabase:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row  # 讓查詢結果可以用欄位名稱存取
         return conn
+
+    def migrate_database(self):
+        """檢查並遷移資料庫架構"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        # 檢查 trades 表的欄位
+        cursor.execute("PRAGMA table_info(trades)")
+        columns = [row['name'] for row in cursor.fetchall()]
+
+        # 定義新欄位及其類型
+        new_columns = {
+            'instrument_type': "TEXT DEFAULT 'stock'",
+            'strike': "REAL",
+            'expiry': "TEXT",
+            'option_type': "TEXT",
+            'multiplier': "INTEGER DEFAULT 1",
+            'underlying': "TEXT"
+        }
+
+        for col_name, col_def in new_columns.items():
+            if col_name not in columns:
+                try:
+                    print(f"Migrating database: Adding column {col_name} to trades table...")
+                    cursor.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_def}")
+                except Exception as e:
+                    print(f"Error adding column {col_name}: {e}")
+
+        conn.commit()
+        conn.close()
 
     def init_database(self):
         """初始化資料庫結構"""
@@ -137,52 +168,70 @@ class TradingDatabase:
 
     def add_trade(self, trade_data: Dict[str, Any]) -> bool:
         """
-        新增交易紀錄（避免重複）
+        新增交易紀錄（避免重複，含驗證）
 
         Args:
             trade_data: 交易數據，應包含 datetime, symbol, action, quantity, price 等欄位
 
         Returns:
-            True 如果成功新增，False 如果交易已存在
+            True 如果成功新增，False 如果交易已存在或驗證失敗
         """
+        import logging
+        from utils.validators import TradeValidator
+
+        # 1. 驗證並修正資料
+        is_valid, errors = TradeValidator.validate_trade(trade_data)
+        if not is_valid:
+            logging.warning(f"Invalid trade data: {', '.join(errors[:3])}")  # 只記錄前 3 個錯誤
+            # 嘗試自動修正
+            trade_data = TradeValidator.auto_fix_trade(trade_data)
+
+        # 2. 檢查重複
         trade_id = self.generate_trade_id(trade_data)
 
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        # 檢查是否已存在
         cursor.execute("SELECT trade_id FROM trades WHERE trade_id = ?", (trade_id,))
         if cursor.fetchone():
             conn.close()
             return False
 
-        # 插入新交易（包含選擇權/期貨欄位）
-        cursor.execute("""
-            INSERT INTO trades
-            (trade_id, datetime, symbol, action, quantity, price, commission, realized_pnl, notes,
-             instrument_type, strike, expiry, option_type, multiplier, underlying)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            trade_id,
-            trade_data.get('datetime'),
-            trade_data.get('symbol'),
-            trade_data.get('action'),
-            trade_data.get('quantity'),
-            trade_data.get('price'),
-            trade_data.get('commission', 0),
-            trade_data.get('realized_pnl', 0),
-            trade_data.get('notes', ''),
-            trade_data.get('instrument_type', 'stock'),
-            trade_data.get('strike'),
-            trade_data.get('expiry'),
-            trade_data.get('option_type'),
-            trade_data.get('multiplier', 1),
-            trade_data.get('underlying')
-        ))
+        # 3. 插入新交易
+        try:
+            cursor.execute("""
+                INSERT INTO trades
+                (trade_id, datetime, symbol, action, quantity, price, commission, realized_pnl, notes,
+                 instrument_type, strike, expiry, option_type, multiplier, underlying)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                trade_id,
+                trade_data.get('datetime'),
+                trade_data.get('symbol'),
+                trade_data.get('action'),
+                trade_data.get('quantity'),
+                trade_data.get('price'),
+                trade_data.get('commission', 0),
+                trade_data.get('realized_pnl', 0),
+                trade_data.get('notes', ''),
+                trade_data.get('instrument_type', 'stock'),
+                trade_data.get('strike'),
+                trade_data.get('expiry'),
+                trade_data.get('option_type'),
+                trade_data.get('multiplier', 1),
+                trade_data.get('underlying')
+            ))
 
-        conn.commit()
-        conn.close()
-        return True
+            conn.commit()
+            logging.info(f"Added trade: {trade_data.get('symbol')} @ {trade_data.get('datetime')}")
+            return True
+
+        except Exception as e:
+            conn.rollback()
+            logging.error(f"Failed to add trade: {str(e)}")
+            return False
+        finally:
+            conn.close()
 
     def get_trades(self,
                    symbol: Optional[str] = None,
@@ -193,8 +242,8 @@ class TradingDatabase:
 
         Args:
             symbol: 標的代號（可選）
-            start_date: 開始日期（可選）
-            end_date: 結束日期（可選）
+            start_date: 開始日期（可選，支援 YYYY-MM-DD 或 YYYYMMDD 格式）
+            end_date: 結束日期（可選，支援 YYYY-MM-DD 或 YYYYMMDD 格式）
 
         Returns:
             交易紀錄列表
@@ -210,12 +259,18 @@ class TradingDatabase:
             params.append(symbol)
 
         if start_date:
+            # 標準化日期格式為 YYYYMMDD（使用統一工具）
+            from utils.datetime_utils import normalize_date
+            normalized_start = normalize_date(start_date)
             query += " AND datetime >= ?"
-            params.append(start_date)
+            params.append(normalized_start)
 
         if end_date:
+            # 標準化日期格式為 YYYYMMDD（使用統一工具）
+            from utils.datetime_utils import normalize_date
+            normalized_end = normalize_date(end_date)
             query += " AND datetime <= ?"
-            params.append(end_date)
+            params.append(normalized_end)
 
         query += " ORDER BY datetime"
 
@@ -238,6 +293,39 @@ class TradingDatabase:
         symbols = [row[0] for row in cursor.fetchall()]
         conn.close()
         return symbols
+
+    def update_trade_pnl(self, trade_id: str, realized_pnl: float):
+        """
+        更新交易的已實現盈虧
+
+        Args:
+            trade_id: 交易 ID
+            realized_pnl: 已實現盈虧金額
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            UPDATE trades
+            SET realized_pnl = ?
+            WHERE trade_id = ?
+        """, (realized_pnl, trade_id))
+
+        conn.commit()
+        conn.close()
+
+    def clear_database(self) -> bool:
+        """清空所有交易資料"""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM trades")
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error clearing database: {e}")
+            return False
 
     def add_journal_entry(self,
                           trade_date: str,

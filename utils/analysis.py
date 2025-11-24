@@ -56,9 +56,9 @@ class TradingAnalyzer:
         if trades_df.empty or ohlc_df.empty:
             return issues
 
-        # 確保日期時間格式一致
-        trades_df['datetime'] = pd.to_datetime(trades_df['datetime'])
-        ohlc_df['datetime'] = pd.to_datetime(ohlc_df['datetime'])
+        # 確保日期時間格式一致，並移除時區資訊
+        trades_df['datetime'] = pd.to_datetime(trades_df['datetime']).dt.tz_localize(None)
+        ohlc_df['datetime'] = pd.to_datetime(ohlc_df['datetime']).dt.tz_localize(None)
 
         # 預先計算指標 (RSI, MA)
         ohlc_df = ohlc_df.sort_values('datetime')
@@ -68,9 +68,9 @@ class TradingAnalyzer:
 
         # 設置 datetime 為索引以便合併
         ohlc_df_indexed = ohlc_df.set_index('datetime')
-        rsi_series.index = ohlc_df['datetime']
-        ma5_series.index = ohlc_df['datetime']
-        ma20_series.index = ohlc_df['datetime']
+        rsi_series.index = ohlc_df['datetime'].values  # 使用 .values 避免時區問題
+        ma5_series.index = ohlc_df['datetime'].values
+        ma20_series.index = ohlc_df['datetime'].values
 
         for idx, trade in trades_df.iterrows():
             trade_time = trade['datetime']
@@ -102,10 +102,14 @@ class TradingAnalyzer:
             if price_range == 0:
                 continue
 
-            # 取得當前指標值 (從預計算的序列中)
-            current_rsi = rsi_series.loc[closest_bar.index[0]] if pd.notna(rsi_series.loc[closest_bar.index[0]]) else 50
-            current_ma5 = ma5_series.loc[closest_bar.index[0]]
-            current_ma20 = ma20_series.loc[closest_bar.index[0]]
+            # 取得當前指標值 (使用時間查找，避免索引類型不匹配)
+            try:
+                current_rsi = rsi_series.loc[bar_time] if pd.notna(rsi_series.loc[bar_time]) else 50
+                current_ma5 = ma5_series.loc[bar_time]
+                current_ma20 = ma20_series.loc[bar_time]
+            except KeyError:
+                # 如果找不到對應時間的指標，使用預設值或跳過
+                continue
             
             # 判斷趨勢狀態 (供參考，不作為絕對對錯標準)
             is_uptrend = current_ma5 > current_ma20 if pd.notna(current_ma5) and pd.notna(current_ma20) else None

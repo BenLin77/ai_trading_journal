@@ -182,9 +182,10 @@ def create_pnl_by_hour_chart(hourly_pnl: Dict[int, float]) -> go.Figure:
     if not hourly_pnl:
         return go.Figure()
 
-    hours = sorted(hourly_pnl.keys())
+    # 過濾掉 None 鍵值並排序
+    hours = sorted([h for h in hourly_pnl.keys() if h is not None and isinstance(h, (int, float))])
     pnls = [hourly_pnl[h] for h in hours]
-    hour_labels = [f'{h:02d}:00' for h in hours]
+    hour_labels = [f'{int(h):02d}:00' for h in hours]
 
     colors = ['#26A69A' if pnl >= 0 else '#EF5350' for pnl in pnls]
 

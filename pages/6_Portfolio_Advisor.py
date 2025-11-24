@@ -69,10 +69,22 @@ with col1:
     df_trades = pd.DataFrame(trades)
 
     # 計算淨持倉
-    df_trades['signed_quantity'] = df_trades.apply(
-        lambda x: x['quantity'] if x['action'] == 'BUY' else -x['quantity'],
-        axis=1
-    )
+    def get_signed_quantity(row):
+        action = row['action'].upper()
+        qty = row['quantity']
+        # 定義買入動作 (增加持倉)
+        if action in ['BUY', 'BUY_TO_OPEN', 'BUY_TO_COVER', 'BOT']:
+            return qty
+        # 定義賣出動作 (減少持倉)
+        elif action in ['SELL', 'SELL_TO_CLOSE', 'SELL_SHORT', 'SLD']:
+            return -qty
+        # 預設處理：如果是 BUY 開頭視為買入，否則視為賣出
+        elif action.startswith('BUY'):
+            return qty
+        else:
+            return -qty
+
+    df_trades['signed_quantity'] = df_trades.apply(get_signed_quantity, axis=1)
 
     # 按標的分組計算淨部位
     positions = df_trades.groupby('symbol').agg({
@@ -195,14 +207,18 @@ if 'market_data' in st.session_state:
     market_df = pd.DataFrame(st.session_state.market_data).T
     market_df.index.name = '標的'
 
+    # 強制轉換混合類型欄位為字串，避免 PyArrow 錯誤
+    cols_to_stringify = ['52w_high', '52w_low', 'beta']
+    for col in cols_to_stringify:
+        if col in market_df.columns:
+            market_df[col] = market_df[col].astype(str)
+
     st.dataframe(
         market_df.style.format({
-            'current_price': '${:.2f}',
-            'change_pct': '{:+.2f}%',
-            'volume': '{:,.0f}',
-            '52w_high': '${:.2f}',
-            '52w_low': '${:.2f}',
-            'beta': '{:.2f}'
+            'current_price': lambda x: f'${x:.2f}' if isinstance(x, (int, float)) else str(x),
+            'change_pct': lambda x: f'{x:+.2f}%' if isinstance(x, (int, float)) else str(x),
+            'volume': lambda x: f'{x:,.0f}' if isinstance(x, (int, float)) else str(x),
+            # 其他欄位已經轉為字串，不需要特別格式化，或者可以保留原樣
         }),
         use_container_width=True
     )

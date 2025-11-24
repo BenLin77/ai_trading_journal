@@ -9,7 +9,7 @@
 """
 
 import re
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, Any
 from datetime import datetime
 import pandas as pd
 
@@ -73,6 +73,24 @@ class InstrumentParser:
             })
             return result
 
+        # 選擇權格式 3: IBKR 簡潔格式 (ONDS 20251114.0C8.0)
+        # 格式: SYMBOL YYYYMMDD.C/PStrike
+        ibkr_pattern = r'^([A-Z]+)\s+(\d{8})\.([CP])([\d.]+)$'
+        match = re.match(ibkr_pattern, symbol)
+
+        if match:
+            underlying, date_str, option_type, strike_str = match.groups()
+            
+            result.update({
+                'instrument_type': 'option',
+                'underlying': underlying,
+                'expiry': datetime.strptime(date_str, '%Y%m%d').strftime('%Y-%m-%d'),
+                'option_type': 'Call' if option_type == 'C' else 'Put',
+                'strike': float(strike_str),
+                'multiplier': 100
+            })
+            return result
+
         # 期貨格式: ESZ24 (ES = 標普500, Z = 12月, 24 = 2024)
         # 常見期貨代號: ES, NQ, YM, CL, GC, SI
         futures_pattern = r'^([A-Z]{1,3})([FGHJKMNQUVXZ])(\d{2})$'
@@ -114,90 +132,11 @@ class InstrumentParser:
         return parsed['instrument_type'] == 'futures'
 
 
-class OptionsStrategyAnalyzer:
-    """選擇權策略分析器"""
-
-    @staticmethod
-    def identify_strategy(trades_df: pd.DataFrame) -> Dict[str, Any]:
-        """
-        識別選擇權交易策略
-
-        Args:
-            trades_df: 交易紀錄 DataFrame
-
-        Returns:
-            策略分析結果
-        """
-        if trades_df.empty:
-            return {'strategy': 'unknown', 'legs': []}
-
-        # 按時間分組（同一時間的交易視為組合策略）
-        trades_df['datetime'] = pd.to_datetime(trades_df['datetime'])
-        grouped = trades_df.groupby(trades_df['datetime'].dt.date)
-
-        strategies = []
-
-        for date, group in grouped:
-            # 解析每個交易
-            legs = []
-            for _, trade in group.iterrows():
-                parsed = InstrumentParser.parse_symbol(trade['symbol'])
-                if parsed['instrument_type'] == 'option':
-                    legs.append({
-                        'underlying': parsed['underlying'],
-                        'strike': parsed['strike'],
-                        'expiry': parsed['expiry'],
-                        'option_type': parsed['option_type'],
-                        'action': trade['action'],
-                        'quantity': trade['quantity']
-                    })
-
-            if legs:
-                strategy_name = OptionsStrategyAnalyzer._classify_strategy(legs)
-                strategies.append({
-                    'date': str(date),
-                    'strategy': strategy_name,
-                    'legs': legs
-                })
-
-        return {
-            'total_strategies': len(strategies),
-            'strategies': strategies
-        }
-
-    @staticmethod
-    def _classify_strategy(legs: List[Dict]) -> str:
-        """根據腳位分類策略"""
-        if len(legs) == 1:
-            return "Long Call" if legs[0]['option_type'] == 'Call' else "Long Put"
-
-        if len(legs) == 2:
-            # 檢查是否為 Spread
-            if legs[0]['option_type'] == legs[1]['option_type']:
-                if legs[0]['strike'] != legs[1]['strike']:
-                    return f"{legs[0]['option_type']} Spread"
-
-            # 檢查是否為 Straddle/Strangle
-            if legs[0]['strike'] == legs[1]['strike']:
-                return "Straddle"
-            else:
-                return "Strangle"
-
-        if len(legs) == 4:
-            # 可能是 Iron Condor 或 Iron Butterfly
-            strikes = sorted([leg['strike'] for leg in legs])
-            if strikes[0] < strikes[1] < strikes[2] < strikes[3]:
-                return "Iron Condor"
-
-        return f"Complex Strategy ({len(legs)} legs)"
-
-
 class DerivativesAnalyzer:
     """衍生性商品綜合分析器"""
 
     def __init__(self):
         self.parser = InstrumentParser()
-        self.strategy_analyzer = OptionsStrategyAnalyzer()
 
     def enrich_trades(self, trades_df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -249,8 +188,7 @@ class DerivativesAnalyzer:
             'call_trades': len(options_only[options_only['option_type'] == 'Call']),
             'put_trades': len(options_only[options_only['option_type'] == 'Put']),
             'total_premium': options_only['notional_value'].sum(),
-            'avg_premium_per_trade': options_only['notional_value'].mean(),
-            'strategies': self.strategy_analyzer.identify_strategy(options_only)
+            'avg_premium_per_trade': options_only['notional_value'].mean()
         }
 
         return metrics
@@ -309,12 +247,6 @@ class DerivativesAnalyzer:
             report.append(f"- Call 交易: {options_metrics['call_trades']}")
             report.append(f"- Put 交易: {options_metrics['put_trades']}")
             report.append(f"- 總權利金: ${options_metrics['total_premium']:,.2f}")
-
-            strategies = options_metrics['strategies']
-            if strategies['total_strategies'] > 0:
-                report.append(f"\n### 識別的策略組合: {strategies['total_strategies']} 個\n")
-                for strat in strategies['strategies'][:5]:  # 只顯示前5個
-                    report.append(f"- **{strat['date']}**: {strat['strategy']}")
 
         # 期貨分析
         futures_metrics = self.calculate_futures_metrics(trades_df)
