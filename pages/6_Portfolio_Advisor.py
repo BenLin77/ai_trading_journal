@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from database import TradingDatabase
 from utils.ai_coach import AICoach
 from utils.derivatives_support import InstrumentParser
+from utils.option_market_data import OptionMarketData
 
 # 頁面配置
 st.set_page_config(
@@ -58,48 +59,72 @@ st.header("📊 當前持倉分析")
 col1, col2 = st.columns([2, 1])
 
 with col1:
-    # 從資料庫計算當前持倉
-    trades = db.get_trades()
+    # 優先使用 Open Positions 快照
+    latest_positions = db.get_latest_positions()
 
-    if not trades:
-        st.warning("⚠️ 資料庫中沒有交易記錄，請先上傳交易報表")
-        st.stop()
+    if latest_positions:
+        # 方案 A：使用 Open Positions（100% 準確）
+        positions = pd.DataFrame(latest_positions)
+        positions.rename(columns={'position': 'net_position', 'average_cost': 'avg_cost'}, inplace=True)
 
-    # 轉換為 DataFrame
-    df_trades = pd.DataFrame(trades)
+        st.success(f"✅ 使用 IBKR Open Positions 快照（{positions.iloc[0]['snapshot_date']}）")
 
-    # 計算淨持倉
-    def get_signed_quantity(row):
-        action = row['action'].upper()
-        qty = row['quantity']
-        # 定義買入動作 (增加持倉)
-        if action in ['BUY', 'BUY_TO_OPEN', 'BUY_TO_COVER', 'BOT']:
-            return qty
-        # 定義賣出動作 (減少持倉)
-        elif action in ['SELL', 'SELL_TO_CLOSE', 'SELL_SHORT', 'SLD']:
-            return -qty
-        # 預設處理：如果是 BUY 開頭視為買入，否則視為賣出
-        elif action.startswith('BUY'):
-            return qty
-        else:
-            return -qty
+        # 添加額外資訊顯示
+        with st.expander("ℹ️ 持倉來源資訊"):
+            st.info("""
+            **使用 Open Positions 快照的優勢：**
+            - ✅ 包含股票拆股/合股調整
+            - ✅ 包含選擇權到期/指派事件
+            - ✅ 包含代碼變更（如 FB → META）
+            - ✅ 精確的平均成本與未實現損益
 
-    df_trades['signed_quantity'] = df_trades.apply(get_signed_quantity, axis=1)
+            **數據來源：** IBKR Flex Query
+            """)
+    else:
+        # 方案 B：從交易推算（有風險）
+        st.warning("⚠️ 未找到 Open Positions 快照，使用交易記錄推算（可能不含拆股/選擇權到期等事件）")
 
-    # 按標的分組計算淨部位
-    positions = df_trades.groupby('symbol').agg({
-        'signed_quantity': 'sum',
-        'price': 'last',  # 最後交易價格
-        'instrument_type': 'first',
-        'underlying': 'first',
-        'strike': 'first',
-        'expiry': 'first',
-        'option_type': 'first'
-    }).reset_index()
+        trades = db.get_trades()
 
-    # 過濾出非零持倉
-    positions = positions[positions['signed_quantity'] != 0].copy()
-    positions.rename(columns={'signed_quantity': 'net_position'}, inplace=True)
+        if not trades:
+            st.error("❌ 資料庫中沒有交易記錄或持倉快照，請先匯入數據")
+            st.stop()
+
+        # 轉換為 DataFrame
+        df_trades = pd.DataFrame(trades)
+
+        # 計算淨持倉
+        def get_signed_quantity(row):
+            action = row['action'].upper()
+            qty = row['quantity']
+            # 定義買入動作 (增加持倉)
+            if action in ['BUY', 'BUY_TO_OPEN', 'BUY_TO_COVER', 'BOT']:
+                return qty
+            # 定義賣出動作 (減少持倉)
+            elif action in ['SELL', 'SELL_TO_CLOSE', 'SELL_SHORT', 'SLD']:
+                return -qty
+            # 預設處理：如果是 BUY 開頭視為買入，否則視為賣出
+            elif action.startswith('BUY'):
+                return qty
+            else:
+                return -qty
+
+        df_trades['signed_quantity'] = df_trades.apply(get_signed_quantity, axis=1)
+
+        # 按標的分組計算淨部位
+        positions = df_trades.groupby('symbol').agg({
+            'signed_quantity': 'sum',
+            'price': 'last',  # 最後交易價格
+            'instrument_type': 'first',
+            'underlying': 'first',
+            'strike': 'first',
+            'expiry': 'first',
+            'option_type': 'first'
+        }).reset_index()
+
+        # 過濾出非零持倉
+        positions = positions[positions['signed_quantity'] != 0].copy()
+        positions.rename(columns={'signed_quantity': 'net_position'}, inplace=True)
 
     if len(positions) == 0:
         st.info("📭 當前沒有未平倉部位")
@@ -223,6 +248,112 @@ if 'market_data' in st.session_state:
         use_container_width=True
     )
 
+# ========== 3.5 選擇權市場分析 ==========
+st.header("📊 選擇權市場分析")
+
+# 篩選出選擇權部位
+option_positions = positions[positions['instrument_type'].isin(['option', 'option_combo'])]
+
+if len(option_positions) > 0 and 'market_data' in st.session_state:
+    if st.button("🔍 分析選擇權市場數據", type="primary"):
+        with st.spinner("正在抓取選擇權市場數據..."):
+            option_analyzer = OptionMarketData()
+
+            # 顯示數據源狀態
+            if option_analyzer.data_source == 'ibkr':
+                if option_analyzer.ib and option_analyzer.ib.isConnected():
+                    st.success("✅ 使用 IBKR 即時數據（已連接）")
+                else:
+                    st.error("❌ IBKR 連接失敗，已降級使用 yfinance（延遲15分鐘）")
+            else:
+                st.info("📊 使用 yfinance 數據（延遲15分鐘，僅限美股）")
+
+            # 批次分析
+            metrics = option_analyzer.get_portfolio_option_metrics(
+                option_positions.to_dict('records')
+            )
+
+            if metrics['total_positions'] > 0:
+                st.success(f"✅ 成功分析 {metrics['total_positions']} 個選擇權部位")
+
+                # 顯示彙總指標
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("平均隱含波動率", f"{metrics['avg_iv']:.1f}%")
+                with col2:
+                    st.metric("總交易量", f"{metrics['total_volume']:,.0f}")
+                with col3:
+                    st.metric("總未平倉量", f"{metrics['total_open_interest']:,.0f}")
+
+                # 顯示詳細數據表格
+                st.subheader("📋 選擇權部位市場數據")
+
+                details_df = pd.DataFrame(metrics['details'])
+
+                st.dataframe(
+                    details_df[[
+                        'position_symbol', 'strike', 'type', 'expiry',
+                        'volume', 'open_interest', 'implied_volatility',
+                        'last_price'
+                    ]].rename(columns={
+                        'position_symbol': '部位',
+                        'strike': '履約價',
+                        'type': '類型',
+                        'expiry': '到期日',
+                        'volume': '交易量',
+                        'open_interest': '未平倉量',
+                        'implied_volatility': 'IV (%)',
+                        'last_price': '最新價'
+                    }).style.format({
+                        '履約價': '${:.2f}',
+                        'IV (%)': '{:.1f}%',
+                        '交易量': '{:,.0f}',
+                        '未平倉量': '{:,.0f}',
+                        '最新價': '${:.2f}'
+                    }),
+                    use_container_width=True
+                )
+
+                # Put/Call Ratio 分析
+                st.subheader("📈 市場情緒指標")
+
+                unique_underlyings = option_positions['underlying'].unique()
+
+                for underlying in unique_underlyings:
+                    with st.expander(f"🎯 {underlying} Put/Call Ratio"):
+                        pc_ratio = option_analyzer.calculate_put_call_ratio(underlying)
+
+                        if 'error' not in pc_ratio:
+                            col1, col2 = st.columns(2)
+
+                            with col1:
+                                st.metric("Volume Ratio (P/C)", f"{pc_ratio['volume_ratio']:.2f}")
+                                st.caption(f"Put 交易量: {pc_ratio['put_volume']:,.0f}")
+                                st.caption(f"Call 交易量: {pc_ratio['call_volume']:,.0f}")
+
+                            with col2:
+                                st.metric("OI Ratio (P/C)", f"{pc_ratio['oi_ratio']:.2f}")
+                                st.caption(f"Put OI: {pc_ratio['put_oi']:,.0f}")
+                                st.caption(f"Call OI: {pc_ratio['call_oi']:,.0f}")
+
+                            # 情緒判斷
+                            sentiment = pc_ratio['sentiment']
+                            if "看跌" in sentiment:
+                                st.warning(f"⚠️ 市場情緒：{sentiment}")
+                            elif "看漲" in sentiment:
+                                st.success(f"✅ 市場情緒：{sentiment}")
+                            else:
+                                st.info(f"ℹ️ 市場情緒：{sentiment}")
+                        else:
+                            st.error(f"無法取得 {underlying} 的數據")
+
+                # 儲存到 session_state 供 AI 分析使用
+                st.session_state.option_metrics = metrics
+            else:
+                st.warning("⚠️ 無法取得選擇權市場數據，可能是標的不支援或網路問題")
+else:
+    st.info("💡 持倉中無選擇權部位，或尚未載入市場數據")
+
 # ========== 4. AI 綜合分析與建議 ==========
 st.header("🤖 AI 綜合分析")
 
@@ -262,12 +393,34 @@ if st.button("🧠 開始 AI 深度分析", type="primary", use_container_width=
                 context += f"- **履約價**: ${row['strike']}\n"
                 context += f"- **到期日**: {row['expiry']}\n"
                 context += f"- **類型**: {row['option_type']}\n"
+            elif pos_type == 'option_combo':
+                # 組合策略顯示
+                context += f"- **策略類型**: {row.get('strategy_type', 'Custom Combo')}\n"
+                context += f"- **履約價範圍**: ${row.get('strike_low', row['strike']):.2f} - ${row.get('strike_high', row['strike']):.2f}\n"
+                context += f"- **到期日**: {row['expiry']}\n"
+                context += f"- **⚠️ 這是組合策略避險部位，請將其視為整體評估風險**\n"
 
         # 加入市場數據
         context += "\n\n## 市場整體狀況\n"
         for symbol, data in st.session_state.market_data.items():
             context += f"- **{symbol}**: ${data['current_price']:.2f} ({data['change_pct']:+.2f}%), "
             context += f"52週範圍: ${data['52w_low']}-${data['52w_high']}, Beta: {data['beta']}\n"
+
+        # 加入選擇權市場數據
+        if 'option_metrics' in st.session_state:
+            opt_metrics = st.session_state.option_metrics
+            context += f"\n\n## 選擇權市場數據\n"
+            context += f"- **持倉數量**: {opt_metrics['total_positions']} 個選擇權部位\n"
+            context += f"- **平均隱含波動率**: {opt_metrics['avg_iv']:.1f}%\n"
+            context += f"- **總交易量**: {opt_metrics['total_volume']:,.0f}\n"
+            context += f"- **總未平倉量**: {opt_metrics['total_open_interest']:,.0f}\n\n"
+
+            context += "### 各部位詳細數據：\n"
+            for detail in opt_metrics['details']:
+                context += f"- **{detail['position_symbol']}**: "
+                context += f"Strike ${detail['strike']}, {detail['type']}, "
+                context += f"IV {detail['implied_volatility']:.1f}%, "
+                context += f"Volume {detail['volume']:,.0f}, OI {detail['open_interest']:,.0f}\n"
 
         # 加入研究報告
         if reports_content:
@@ -279,16 +432,33 @@ if st.button("🧠 開始 AI 深度分析", type="primary", use_container_width=
 
 {context}
 
+**重要提示：**
+- 如果持倉中包含「option_combo」類型（如 Risk Reversal、Iron Condor），這代表**已存在的組合策略避險部位**
+- 請將這些組合策略視為**整體風險管理單元**，不要建議對已避險的部位再次避險
+- 分析時需考慮組合策略的動態 Greeks（Delta、Gamma、Theta、Vega）
+- 如果有提供選擇權市場數據（IV、交易量、未平倉量），請特別注意：
+  - **高 IV（>60%）**：市場預期大幅波動，權利金昂貴
+  - **低交易量 + 高未平倉量**：可能流動性不佳，難以平倉
+  - **Put/Call Ratio > 1.2**：市場偏空，可能有下跌壓力
+
 請提供以下分析（使用繁體中文，格式清晰）：
 
 ## 1. 投資組合風險評估
-- 整體風險暴露分析
+- 整體風險暴露分析（含組合策略的淨 Delta）
 - 單一標的集中度風險
 - 市場方向性風險（多空平衡）
 - 時間風險（選擇權到期風險）
-- 潛在損失情境分析
+- 潛在損失情境分析（包含組合策略的保護範圍）
+- **選擇權市場情緒分析**（若有數據）：
+  - 當前 IV 水平的意義（高估或低估）
+  - 交易量與未平倉量的警訊
+  - 市場情緒偏多或偏空
 
 ## 2. 即時避險建議
+**評估原則：**
+- 若已存在組合策略避險單（如 Risk Reversal），先評估其保護效果
+- 僅在保護不足時才建議額外避險
+
 如果需要避險，請提供**具體可執行的建議**：
 - 明確標的符號
 - 精確口數/股數
@@ -297,11 +467,8 @@ if st.button("🧠 開始 AI 深度分析", type="primary", use_container_width=
 - 執行時機建議
 
 範例格式：
-> **立即執行避險：**
-> - 賣出 ONDS 20251220 Call $10 x 30口（覆蓋現有多頭部位）
-> - 買入 ONDS 20251220 Put $6.5 x 20口（下檔保護）
-> - 預估成本：$XXX
-> - 保護範圍：股價跌破 $X.X 時啟動
+> **評估結果：** ONDS 已有 Risk Reversal（6.5/10）保護，覆蓋 XX 股，保護範圍為 $6.5-$10
+> **建議：** 如股價跌破 $X，考慮加強下檔保護
 
 ## 3. 部位調整建議
 - 是否需要減倉/加倉？

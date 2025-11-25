@@ -80,7 +80,7 @@ class InstrumentParser:
 
         if match:
             underlying, date_str, option_type, strike_str = match.groups()
-            
+
             result.update({
                 'instrument_type': 'option',
                 'underlying': underlying,
@@ -88,6 +88,41 @@ class InstrumentParser:
                 'option_type': 'Call' if option_type == 'C' else 'Put',
                 'strike': float(strike_str),
                 'multiplier': 100
+            })
+            return result
+
+        # 選擇權格式 4: 組合策略格式 (ONDS Dec05 6.5/10 Risk Reversal)
+        # 格式: SYMBOL MonDD Strike1/Strike2 Strategy_Name
+        # 支援策略: Risk Reversal, Iron Condor, Bull Spread, Bear Spread, Straddle, Strangle
+        combo_pattern = r'^([A-Z]+)\s+([A-Za-z]{3}\d{2})\s+([\d.]+)/([\d.]+)\s+(.+)$'
+        match = re.match(combo_pattern, symbol)
+
+        if match:
+            underlying, date_str, strike1, strike2, strategy_name = match.groups()
+
+            # 解析月份縮寫 (Dec -> 12)
+            month_map = {
+                'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04',
+                'May': '05', 'Jun': '06', 'Jul': '07', 'Aug': '08',
+                'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dec': '12'
+            }
+            month_abbr = date_str[:3]
+            day = date_str[3:5]
+            year = f'2025'  # 預設年份，可根據需要動態調整
+
+            expiry_date = f'{year}-{month_map.get(month_abbr, "12")}-{day}'
+
+            result.update({
+                'instrument_type': 'option_combo',
+                'underlying': underlying,
+                'expiry': expiry_date,
+                'strike_low': float(strike1),
+                'strike_high': float(strike2),
+                'strategy_type': strategy_name.strip(),
+                'multiplier': 100,
+                # 保留原始 strike 欄位以兼容現有程式碼
+                'strike': float(strike1),
+                'option_type': 'Combo'
             })
             return result
 

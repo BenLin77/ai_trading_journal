@@ -148,6 +148,38 @@ class TradingDatabase:
             )
         """)
 
+        # 建立 Open Positions 表（未平倉快照）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS open_positions (
+                position_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_date TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                position REAL NOT NULL,
+                mark_price REAL,
+                average_cost REAL,
+                unrealized_pnl REAL,
+                instrument_type TEXT DEFAULT 'stock',
+                underlying TEXT,
+                strike REAL,
+                expiry TEXT,
+                option_type TEXT,
+                multiplier INTEGER DEFAULT 1,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(snapshot_date, symbol)
+            )
+        """)
+
+        # 建立索引
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_positions_snapshot
+            ON open_positions(snapshot_date)
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_positions_symbol
+            ON open_positions(symbol)
+        """)
+
         conn.commit()
         conn.close()
 
@@ -326,6 +358,119 @@ class TradingDatabase:
         except Exception as e:
             print(f"Error clearing database: {e}")
             return False
+
+    # ========== Open Positions 管理 ==========
+
+    def upsert_open_positions(self, positions: List[Dict[str, Any]], snapshot_date: str = None) -> int:
+        """
+        更新或插入 Open Positions 快照（覆蓋模式）
+
+        Args:
+            positions: 持倉列表，每個元素包含 symbol, position, mark_price, average_cost, unrealized_pnl 等
+            snapshot_date: 快照日期（YYYY-MM-DD），預設為今天
+
+        Returns:
+            成功插入的記錄數
+        """
+        from utils.derivatives_support import InstrumentParser
+
+        if snapshot_date is None:
+            snapshot_date = datetime.now().strftime('%Y-%m-%d')
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        # 刪除舊的同日快照
+        cursor.execute("DELETE FROM open_positions WHERE snapshot_date = ?", (snapshot_date,))
+
+        inserted_count = 0
+        for pos in positions:
+            try:
+                # 解析標的類型
+                parsed = InstrumentParser.parse_symbol(pos.get('symbol', ''))
+
+                cursor.execute("""
+                    INSERT INTO open_positions
+                    (snapshot_date, symbol, position, mark_price, average_cost, unrealized_pnl,
+                     instrument_type, underlying, strike, expiry, option_type, multiplier)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    snapshot_date,
+                    pos.get('symbol'),
+                    pos.get('position', 0),
+                    pos.get('mark_price'),
+                    pos.get('average_cost'),
+                    pos.get('unrealized_pnl', 0),
+                    parsed.get('instrument_type', 'stock'),
+                    parsed.get('underlying'),
+                    parsed.get('strike'),
+                    parsed.get('expiry'),
+                    parsed.get('option_type'),
+                    parsed.get('multiplier', 1)
+                ))
+                inserted_count += 1
+            except Exception as e:
+                print(f"Error inserting position {pos.get('symbol')}: {e}")
+
+        conn.commit()
+        conn.close()
+        return inserted_count
+
+    def get_latest_positions(self) -> List[Dict[str, Any]]:
+        """
+        取得最新的 Open Positions 快照
+
+        Returns:
+            持倉列表
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        # 先找到最新的 snapshot_date
+        cursor.execute("""
+            SELECT MAX(snapshot_date) as latest_date
+            FROM open_positions
+        """)
+        result = cursor.fetchone()
+        latest_date = result['latest_date'] if result else None
+
+        if not latest_date:
+            conn.close()
+            return []
+
+        # 取得該日期的所有持倉
+        cursor.execute("""
+            SELECT * FROM open_positions
+            WHERE snapshot_date = ?
+            ORDER BY symbol
+        """, (latest_date,))
+
+        positions = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return positions
+
+    def get_positions_by_date(self, snapshot_date: str) -> List[Dict[str, Any]]:
+        """
+        取得指定日期的 Open Positions
+
+        Args:
+            snapshot_date: 日期（YYYY-MM-DD）
+
+        Returns:
+            持倉列表
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT * FROM open_positions
+            WHERE snapshot_date = ?
+            ORDER BY symbol
+        """, (snapshot_date,))
+
+        positions = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return positions
 
     def add_journal_entry(self,
                           trade_date: str,

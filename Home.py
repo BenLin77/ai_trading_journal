@@ -619,10 +619,7 @@ if import_source:
             # 使用已經讀取的 df_preview
             if 'df_preview' in locals() and len(df_preview) > 0:
                 with st.spinner(f"檢測到新資料，正在匯入..."):
-                    # 顯示本次匯入資訊
-                    st.info(f"📊 發現 {len(df_preview)} 筆交易記錄")
                     process_and_import_csv(df_preview, source_name="自動載入")
-                    st.success(f"✅ 匯入完成（避免重複：已使用內容 hash 檢查）")
         except Exception as e:
             st.error(f"❌ 自動匯入失敗：{str(e)}")
     else:
@@ -732,6 +729,70 @@ else:
         except Exception as e:
             st.error(f"❌ 檔案處理錯誤：{str(e)}")
             st.info("請確認 CSV 檔案格式正確，或聯繫技術支援。")
+
+    # ========== Open Positions 匯入 ==========
+    st.markdown("---")
+    st.header("📊 匯入 Open Positions（未平倉快照）")
+
+    st.info("""
+    **Open Positions 快照的用途：**
+    - ✅ 提供 100% 準確的持倉資訊
+    - ✅ 包含股票拆股、選擇權到期等事件
+    - ✅ 精確的平均成本與未實現損益
+
+    **CSV 格式要求：**
+    - 必須包含欄位：`Symbol`, `Position`, `Mark Price`, `Average Cost`
+    - 可選欄位：`Unrealized P&L`, `Strike`, `Expiry`, `Right`
+
+    💡 **提示**：從 IBKR Flex Query 匯出 Open Positions 報表
+    """)
+
+    uploaded_positions = st.file_uploader(
+        "選擇 Open Positions CSV",
+        type=['csv'],
+        key="positions_uploader",
+        help="請選擇從 IBKR 匯出的 Open Positions 報表"
+    )
+
+    if uploaded_positions is not None:
+        try:
+            df_pos = pd.read_csv(uploaded_positions)
+            st.success(f"✅ 成功讀取 Open Positions，共 {len(df_pos)} 個部位")
+
+            # 驗證欄位
+            required_cols = ['Symbol', 'Position', 'Mark Price', 'Average Cost']
+            missing_cols = [col for col in required_cols if col not in df_pos.columns]
+
+            if missing_cols:
+                st.error(f"❌ 缺少必要欄位：{', '.join(missing_cols)}")
+                st.stop()
+
+            # 顯示預覽
+            with st.expander("📋 查看 Open Positions 數據", expanded=True):
+                st.dataframe(df_pos.head(10), use_container_width=True)
+
+            # 轉換為資料庫格式
+            positions_data = []
+            for _, row in df_pos.iterrows():
+                pos_dict = {
+                    'symbol': str(row['Symbol']).strip(),
+                    'position': float(row['Position']),
+                    'mark_price': float(row['Mark Price']) if pd.notna(row.get('Mark Price')) else None,
+                    'average_cost': float(row['Average Cost']) if pd.notna(row.get('Average Cost')) else None,
+                    'unrealized_pnl': float(row.get('Unrealized P&L', 0)) if pd.notna(row.get('Unrealized P&L')) else 0
+                }
+                positions_data.append(pos_dict)
+
+            # 寫入資料庫
+            if st.button("💾 匯入 Open Positions", type="primary", use_container_width=True):
+                with st.spinner("正在匯入..."):
+                    count = db.upsert_open_positions(positions_data)
+                st.success(f"✅ 成功匯入 {count} 個持倉快照！")
+                st.info("請前往 **Portfolio Advisor** 頁面查看分析結果")
+
+        except Exception as e:
+            st.error(f"❌ 檔案處理錯誤：{str(e)}")
+            st.info("請確認 CSV 格式正確")
 
 # 側邊欄：系統狀態
 with st.sidebar:
