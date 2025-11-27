@@ -260,13 +260,7 @@ if len(option_positions) > 0 and 'market_data' in st.session_state:
             option_analyzer = OptionMarketData()
 
             # 顯示數據源狀態
-            if option_analyzer.data_source == 'ibkr':
-                if option_analyzer.ib and option_analyzer.ib.isConnected():
-                    st.success("✅ 使用 IBKR 即時數據（已連接）")
-                else:
-                    st.error("❌ IBKR 連接失敗，已降級使用 yfinance（延遲15分鐘）")
-            else:
-                st.info("📊 使用 yfinance 數據（延遲15分鐘，僅限美股）")
+            st.info("📊 選擇權市場數據來源：yfinance（延遲15分鐘，僅限美股）")
 
             # 批次分析
             metrics = option_analyzer.get_portfolio_option_metrics(

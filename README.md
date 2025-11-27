@@ -65,10 +65,13 @@
 > - 賣出 ONDS 20251220 Call $10 x 30口
 > - 買入 ONDS 20251220 Put $6.5 x 20口
 > - 預估成本：$XXX，保護範圍：$X.X
-### 🆕 8. 🤖 自動化匯入 (n8n/CSV Integration)
-- 支援透過 n8n 自動抓取交易資料並匯出為 CSV
-- 支援在 `.env` 中設定 `AUTO_IMPORT_CSV_PATH` 實現自動載入
-- 亦可隨時手動上傳 CSV 檔案
+### 🆕 8. 🤖 自動化匯入 (IBKR Flex Query / CSV Integration)
+- **IBKR Flex Query API**：透過 Token 和 Query ID 自動同步交易記錄和庫存快照
+  - 無需手動匯出 CSV
+  - 支援選擇權完整欄位（Strike、Expiry、Put/Call）
+  - 每日自動更新（可設定排程）
+  - 詳見 [IBKR Flex Query 設定指南](docs/ibkr_flex_query_setup.md)
+- 傳統 CSV 匯入：支援在 `.env` 中設定 `AUTO_IMPORT_CSV_PATH` 或手動上傳
 
 ### 🆕 9. 🃏 錯誤卡片牆 (Mistake Cards)
 - **自動偵測**：AI 教練會從對話中自動識別你的交易失誤（如凹單、追高）

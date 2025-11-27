@@ -558,6 +558,40 @@ def render_dashboard(db):
 # 主標題
 st.title("📊 AI 交易日誌系統")
 
+# ========== IBKR Flex Query 自動同步 ==========
+st.markdown("---")
+col1, col2 = st.columns([3, 1])
+
+with col1:
+    st.markdown("### 🔄 IBKR 自動同步")
+
+with col2:
+    if st.button("📥 執行同步", type="primary", use_container_width=True, help="從 IBKR Flex Query 自動取得交易記錄和庫存快照"):
+        try:
+            from utils.ibkr_flex_query import IBKRFlexQuery
+
+            with st.spinner("正在連接 IBKR Flex Query..."):
+                flex = IBKRFlexQuery()
+                result = flex.sync_to_database(db)
+
+                st.success(f"✅ 同步完成！交易記錄：{result['trades']} 筆，庫存快照：{result['positions']} 個部位")
+
+                # 觸發 PnL 重算
+                if result['trades'] > 0:
+                    with st.spinner("重新計算損益..."):
+                        pnl_calc = PnLCalculator(db)
+                        pnl_calc.recalculate_all()
+                    st.toast("✅ 損益已重新計算")
+
+        except ValueError as e:
+            st.error(f"❌ 設定錯誤：{str(e)}")
+            st.info("請在 `.env` 檔案中設定 `IBKR_FLEX_TOKEN`、`IBKR_TRADES_QUERY_ID` 和 `IBKR_POSITIONS_QUERY_ID`")
+        except Exception as e:
+            st.error(f"❌ 同步失敗：{str(e)}")
+            logger.error(f"IBKR Flex Query 同步失敗: {str(e)}")
+
+st.markdown("---")
+
 # 檢查自動匯入設定 (優先使用 Google Sheet URL)
 google_sheet_url = os.getenv('GOOGLE_SHEET_URL', '').strip()
 auto_csv_path = os.getenv('AUTO_IMPORT_CSV_PATH', '').strip()
