@@ -1,8 +1,10 @@
-#!/usr/bin/env python3
 """
 IBKR Flex Query 測試腳本
 
 測試 Flex Query API 連接和數據抓取
+
+使用方式：
+    uv run test_ibkr_flex.py
 """
 
 from utils.ibkr_flex_query import IBKRFlexQuery

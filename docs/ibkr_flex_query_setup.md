@@ -107,7 +107,7 @@ IBKR_POSITIONS_QUERY_ID=123457  # 庫存快照 Query ID
 執行測試腳本：
 
 ```bash
-uv run python -c "from utils.ibkr_flex_query import IBKRFlexQuery; flex = IBKRFlexQuery(); print('✅ 連接成功')"
+uv run test_ibkr_flex.py
 ```
 
 ## 使用方式
@@ -144,7 +144,7 @@ print(f"庫存快照：{result['positions']} 個部位")
 
 ```bash
 # 每天早上 9:00 自動同步
-0 9 * * * cd /path/to/ai_trading_journal && /path/to/uv run python -c "from utils.ibkr_flex_query import IBKRFlexQuery; from database import TradingDatabase; flex = IBKRFlexQuery(); db = TradingDatabase(); flex.sync_to_database(db)"
+0 9 * * * cd /path/to/ai_trading_journal && uv run test_ibkr_flex.py
 ```
 
 ## API 限制與注意事項
@@ -181,13 +181,15 @@ IBKR Flex Token 無過期時間，但可以隨時 Revoke。若需更新：
 4. 右上角會顯示 Query ID
 
 ### Q3: 如何驗證數據正確性？
+執行測試腳本會自動驗證：
 ```bash
-# 檢查最新庫存
-uv run python -c "from database import TradingDatabase; db = TradingDatabase(); import pandas as pd; print(pd.DataFrame(db.get_latest_positions()))"
-
-# 檢查最新交易
-uv run python -c "from database import TradingDatabase; db = TradingDatabase(); print(db.get_recent_trades(limit=10))"
+uv run test_ibkr_flex.py
 ```
+
+或在 Streamlit UI 中查看：
+1. 前往 Portfolio Advisor 頁面
+2. 檢查持倉數據是否正確
+3. 確認快照日期是否為最新
 
 ### Q4: 選擇權數據格式如何識別？
 系統會自動解析 IBKR 回傳的選擇權數據：

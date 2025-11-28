@@ -192,7 +192,7 @@ streamlit run Home.py
 
 **選項 B：自動化批次回測**
 1. 建立 JSON 配置檔案（範例見 `core/automation/`）
-2. 執行自動化腳本：`uv run python run_backtest.py`
+2. 執行自動化腳本：`uv run run_backtest.py`
 3. 載入回測結果到策略實驗室
 4. 取得 AI 過擬合風險評估與建議
 
@@ -398,7 +398,7 @@ ai_trading_journal/
 
 執行：
 ```bash
-uv run python run_backtest.py --config backtest_config.json
+uv run run_backtest.py --config backtest_config.json
 ```
 
 ## 🔒 安全注意事項

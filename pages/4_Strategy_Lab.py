@@ -63,14 +63,22 @@ with st.sidebar:
     available_backtests = loader.list_available_backtests()
 
     if not available_backtests:
-        st.error("❌ 未找到任何回測結果")
+        st.warning("⚠️ 尚無回測結果")
         st.info("""
-        請先執行以下步驟：
-        1. 開啟終端機 (Terminal)
-        2. 執行 `python run_backtest.py` 進行回測
-        3. 回測結果將儲存在 `records/metricstracker/` 目錄
-        4. 回到本頁面重新載入
+        **選項 A：在此頁面執行回測**
+        點擊下方「🚀 執行新回測」按鈕
+
+        **選項 B：使用命令列**
+        ```bash
+        uv run run_backtest.py --config your_config.json
+        ```
         """)
+
+        # 顯示「執行新回測」按鈕
+        if st.button("🚀 執行新回測", type="primary"):
+            st.info("💡 回測功能開發中，目前請使用選項 B 透過命令列執行")
+            st.code("uv run run_backtest.py --config backtest_config.json", language="bash")
+
         st.stop()
 
     # 選擇回測檔案
@@ -347,11 +355,13 @@ else:
     ### 📖 使用說明
 
     #### 1. 執行回測
+    **選項 A：UI 執行（未來功能）**
+    - 直接在此頁面配置並執行回測
+    - 即時查看進度與結果
+
+    **選項 B：命令列執行（當前）**
     ```bash
-    # 在專案根目錄下執行
-    python run_backtest.py
-    # 選擇 "5. 🚀 Autorunner 自動化回測"
-    # 或手動執行完整回測流程
+    uv run run_backtest.py --config your_config.json
     ```
 
     #### 2. 回測結果位置
