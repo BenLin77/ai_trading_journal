@@ -310,6 +310,200 @@ class IBKRFlexQuery:
 
         return pd.DataFrame(positions)
 
+    def get_historical_trades(
+        self,
+        query_id: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        symbol: Optional[str] = None
+    ) -> pd.DataFrame:
+        """
+        取得歷史交易記錄（過去一年）
+
+        Args:
+            query_id: 自訂的 Flex Query ID，預設使用環境變數 IBKR_HISTORY_QUERY_ID
+            start_date: 開始日期 (YYYY-MM-DD)
+            end_date: 結束日期 (YYYY-MM-DD)
+            symbol: 篩選特定標的
+
+        Returns:
+            trades_df: 歷史交易記錄 DataFrame
+        """
+        # 使用提供的 query_id 或環境變數
+        history_query_id = query_id or os.getenv('IBKR_HISTORY_QUERY_ID')
+        
+        if not history_query_id:
+            raise ValueError("請提供 query_id 或設定 IBKR_HISTORY_QUERY_ID 環境變數")
+
+        import time
+        
+        # Step 1: 請求生成報表
+        reference_code = self._request_report(history_query_id)
+
+        # Step 2: 等待報表生成（歷史報表較大，需要等待）
+        time.sleep(15)
+
+        # Step 3: 取得報表
+        content = self._get_report(reference_code)
+
+        # Step 4: 偵測格式並解析
+        format_type = self._detect_format(content)
+        if format_type == 'csv':
+            trades = self._parse_historical_trades_csv(content)
+        else:
+            trades = self._parse_trades_xml(content)
+
+        if not trades:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(trades)
+
+        # 日期篩選
+        if 'trade_date' in df.columns:
+            df['trade_date'] = pd.to_datetime(df['trade_date'], errors='coerce')
+            
+            if start_date:
+                df = df[df['trade_date'] >= pd.to_datetime(start_date)]
+            if end_date:
+                df = df[df['trade_date'] <= pd.to_datetime(end_date)]
+
+        # 標的篩選
+        if symbol and 'symbol' in df.columns:
+            df = df[df['symbol'].str.upper() == symbol.upper()]
+
+        return df
+
+    def _parse_historical_trades_csv(self, csv_content: str) -> List[Dict]:
+        """
+        解析歷史交易 CSV（更詳細的格式）
+        
+        Args:
+            csv_content: Flex Query 回傳的 CSV
+            
+        Returns:
+            trades: 交易記錄列表
+        """
+        from io import StringIO
+        
+        try:
+            df = pd.read_csv(StringIO(csv_content))
+        except Exception as e:
+            raise Exception(f"CSV 解析失敗: {str(e)}")
+        
+        trades = []
+        for _, row in df.iterrows():
+            # 處理日期
+            trade_date = str(row.get('TradeDate', ''))
+            if trade_date and len(trade_date) == 8:
+                trade_date = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}"
+            
+            # 處理時間
+            date_time = str(row.get('DateTime', ''))
+            if ';' in date_time:
+                parts = date_time.split(';')
+                if len(parts) == 2 and len(parts[0]) == 8:
+                    date_time = f"{parts[0][:4]}-{parts[0][4:6]}-{parts[0][6:8]} {parts[1]}"
+            
+            # 判斷買賣方向
+            quantity = float(row.get('Quantity', 0))
+            buy_sell = str(row.get('Buy/Sell', ''))
+            
+            trade_data = {
+                'trade_date': trade_date,
+                'date_time': date_time,
+                'symbol': str(row.get('Symbol', '')),
+                'description': str(row.get('Description', '')),
+                'asset_class': str(row.get('AssetClass', 'STK')),
+                'buy_sell': buy_sell,
+                'quantity': quantity,
+                'price': float(row.get('TradePrice', 0)),
+                'proceeds': float(row.get('Proceeds', 0)),
+                'commission': float(row.get('IBCommission', 0)),
+                'net_cash': float(row.get('NetCash', 0)),
+                'realized_pnl': float(row.get('FifoPnlRealized', 0)),
+                'mtm_pnl': float(row.get('MtmPnl', 0)),
+                'open_close': str(row.get('Open/CloseIndicator', '')),
+                'exchange': str(row.get('Exchange', '')),
+                'order_type': str(row.get('OrderType', '')),
+                # 選擇權相關
+                'put_call': str(row.get('Put/Call', '')),
+                'strike': str(row.get('Strike', '')),
+                'expiry': str(row.get('Expiry', '')),
+                'underlying': str(row.get('UnderlyingSymbol', '')),
+            }
+            trades.append(trade_data)
+        
+        return trades
+
+    def get_trade_summary_for_ai(
+        self,
+        query_id: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        symbol: Optional[str] = None
+    ) -> Dict:
+        """
+        取得適合 AI 分析的交易摘要
+        
+        Returns:
+            summary: 包含統計數據和交易明細的字典
+        """
+        df = self.get_historical_trades(
+            query_id=query_id,
+            start_date=start_date,
+            end_date=end_date,
+            symbol=symbol
+        )
+        
+        if df.empty:
+            return {'error': '無交易記錄', 'trades': [], 'statistics': {}}
+        
+        # 計算統計數據
+        total_trades = len(df)
+        total_realized_pnl = df['realized_pnl'].sum() if 'realized_pnl' in df.columns else 0
+        total_commission = df['commission'].sum() if 'commission' in df.columns else 0
+        
+        # 分析勝敗
+        if 'realized_pnl' in df.columns:
+            closed_trades = df[df['open_close'] == 'C']
+            winning_trades = closed_trades[closed_trades['realized_pnl'] > 0]
+            losing_trades = closed_trades[closed_trades['realized_pnl'] < 0]
+            
+            win_rate = len(winning_trades) / len(closed_trades) * 100 if len(closed_trades) > 0 else 0
+            avg_win = winning_trades['realized_pnl'].mean() if len(winning_trades) > 0 else 0
+            avg_loss = losing_trades['realized_pnl'].mean() if len(losing_trades) > 0 else 0
+        else:
+            win_rate = avg_win = avg_loss = 0
+        
+        # 按標的分組統計
+        symbol_stats = {}
+        if 'symbol' in df.columns:
+            for sym in df['symbol'].unique():
+                sym_df = df[df['symbol'] == sym]
+                sym_pnl = sym_df['realized_pnl'].sum() if 'realized_pnl' in sym_df.columns else 0
+                sym_trades = len(sym_df)
+                symbol_stats[sym] = {'trades': sym_trades, 'pnl': round(sym_pnl, 2)}
+        
+        # 準備交易明細（限制數量以控制 token）
+        trades_for_ai = df.head(100).to_dict(orient='records')
+        
+        return {
+            'period': {
+                'start': start_date or df['trade_date'].min().strftime('%Y-%m-%d') if 'trade_date' in df.columns else 'N/A',
+                'end': end_date or df['trade_date'].max().strftime('%Y-%m-%d') if 'trade_date' in df.columns else 'N/A',
+            },
+            'statistics': {
+                'total_trades': total_trades,
+                'total_realized_pnl': round(total_realized_pnl, 2),
+                'total_commission': round(total_commission, 2),
+                'win_rate': round(win_rate, 2),
+                'avg_win': round(avg_win, 2),
+                'avg_loss': round(avg_loss, 2),
+            },
+            'by_symbol': symbol_stats,
+            'trades': trades_for_ai,
+        }
+
     def sync_to_database(self, db) -> Dict[str, int]:
         """
         同步交易記錄和庫存到資料庫

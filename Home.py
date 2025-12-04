@@ -693,20 +693,80 @@ def render_dashboard(db):
     st.markdown("---")
     st.markdown("### 🎯 策略總覽")
     
-    # 計算正股持倉
-    stock_positions = {}
-    for symbol in pnl_by_symbol.keys():
-        # 檢查是否是正股（不含選擇權符號特徵）
-        if ' ' not in symbol and not any(c.isdigit() for c in symbol[-4:]):
-            symbol_trades_list = [t for t in trades if t['symbol'] == symbol]
-            buy_qty = sum(t['quantity'] for t in symbol_trades_list if t['action'].upper() in ['BUY', 'BOT'])
-            sell_qty = sum(t['quantity'] for t in symbol_trades_list if t['action'].upper() in ['SELL', 'SLD'])
-            net_qty = buy_qty - sell_qty
-            if net_qty > 0:
-                stock_positions[symbol] = net_qty
+    # 嘗試從 IBKR 庫存快照直接分析策略（更準確）
+    strategies = []
+    ibkr_positions_df = None
     
-    # 合成策略
-    strategies = OptionStrategyDetector.synthesize_strategies_from_positions(trades, stock_positions)
+    # 檢查是否有 IBKR 設定
+    ibkr_token = os.getenv('IBKR_FLEX_TOKEN', '').strip()
+    positions_query_id = os.getenv('IBKR_POSITIONS_QUERY_ID', '').strip()
+    
+    # 如果有 IBKR 設定，即時取得庫存
+    if ibkr_token and positions_query_id:
+        # 先檢查 session_state 是否已有快取
+        if 'ibkr_positions_df' in st.session_state and st.session_state['ibkr_positions_df'] is not None:
+            ibkr_positions_df = st.session_state['ibkr_positions_df']
+        else:
+            # 即時取得（只在沒有快取時）
+            try:
+                import requests
+                import time
+                from io import StringIO
+                
+                BASE_URL = "https://gdcdyn.interactivebrokers.com/Universal/servlet"
+                
+                # Step 1: 請求報表
+                url = f"{BASE_URL}/FlexStatementService.SendRequest"
+                params = {'t': ibkr_token, 'q': positions_query_id, 'v': '3'}
+                response = requests.get(url, params=params, timeout=30)
+                
+                import xml.etree.ElementTree as ET
+                root = ET.fromstring(response.content)
+                status = root.find('.//Status').text
+                
+                if status == 'Success':
+                    ref = root.find('.//ReferenceCode').text
+                    time.sleep(10)  # 等待
+                    
+                    # Step 2: 取得報表
+                    url2 = f"{BASE_URL}/FlexStatementService.GetStatement"
+                    params2 = {'t': ibkr_token, 'q': ref, 'v': '3'}
+                    resp2 = requests.get(url2, params=params2, timeout=60)
+                    content = resp2.text
+                    
+                    if not content.strip().startswith('<'):
+                        ibkr_positions_df = pd.read_csv(StringIO(content))
+                        st.session_state['ibkr_positions_df'] = ibkr_positions_df
+            except Exception as e:
+                logger.warning(f"即時取得 IBKR 庫存失敗: {e}")
+    
+    # DEBUG: 顯示數據狀態
+    with st.expander("🔧 策略分析調試", expanded=False):
+        if ibkr_positions_df is not None:
+            st.write(f"✅ 有 IBKR 庫存數據：{len(ibkr_positions_df)} 筆")
+            st.write("欄位:", list(ibkr_positions_df.columns))
+            st.dataframe(ibkr_positions_df)
+        else:
+            st.write("❌ 無 IBKR 庫存數據（請確認 .env 設定正確）")
+    
+    if ibkr_positions_df is not None and not ibkr_positions_df.empty:
+        # 使用 IBKR 庫存快照（最準確）
+        strategies = OptionStrategyDetector.analyze_ibkr_positions(ibkr_positions_df)
+    else:
+        # 降級：從交易記錄計算持倉（可能不準確）
+        stock_positions = {}
+        for symbol in pnl_by_symbol.keys():
+            # 檢查是否是正股（不含選擇權符號特徵）
+            if ' ' not in symbol and not any(c.isdigit() for c in symbol[-4:]):
+                symbol_trades_list = [t for t in trades if t['symbol'] == symbol]
+                buy_qty = sum(t['quantity'] for t in symbol_trades_list if t['action'].upper() in ['BUY', 'BOT'])
+                sell_qty = sum(t['quantity'] for t in symbol_trades_list if t['action'].upper() in ['SELL', 'SLD'])
+                net_qty = buy_qty - sell_qty
+                if net_qty > 0:
+                    stock_positions[symbol] = net_qty
+        
+        # 合成策略
+        strategies = OptionStrategyDetector.synthesize_strategies_from_positions(trades, stock_positions)
     
     if strategies:
         # 按策略類型分組顯示
@@ -751,10 +811,15 @@ def render_dashboard(db):
                         opt_type = "Call" if opt['option_type'] == 'C' else "Put"
                         action_text = "買" if opt['action'] == 'LONG' else "賣"
                         strike = opt.get('strike', 'N/A')
-                        expiry = opt.get('expiry', 'N/A')
-                        qty = abs(opt.get('quantity', 0))
+                        # 格式化到期日
+                        expiry_raw = str(opt.get('expiry', 'N/A')).replace('.0', '').replace('-', '')
+                        if len(expiry_raw) == 8 and expiry_raw.isdigit():
+                            expiry = f"{expiry_raw[:4]}/{expiry_raw[4:6]}/{expiry_raw[6:8]}"
+                        else:
+                            expiry = expiry_raw
+                        qty = int(abs(opt.get('quantity', 0)))
                         
-                        st.markdown(f"{action_icon} **{action_text} {opt_type}** @ ${strike} x {qty} (到期: {expiry})")
+                        st.markdown(f"{action_icon} **{action_text} {opt_type}** @ ${strike:.0f} x {qty} (到期: {expiry})")
     else:
         st.info("未偵測到選擇權策略組合")
     
@@ -855,10 +920,31 @@ def perform_ibkr_sync():
     """執行 IBKR 同步"""
     try:
         from utils.ibkr_flex_query import IBKRFlexQuery
+        import time
         
         with st.spinner("正在連接 IBKR..."):
             flex = IBKRFlexQuery()
+            
+            # 同步到資料庫
             result = flex.sync_to_database(db)
+            
+            # 額外取得原始庫存 DataFrame 供策略分析
+            try:
+                positions_query_id = os.getenv('IBKR_POSITIONS_QUERY_ID')
+                if positions_query_id:
+                    # 直接請求庫存報表
+                    reference_code = flex._request_report(positions_query_id)
+                    time.sleep(10)  # 等待報表生成
+                    content = flex._get_report(reference_code)
+                    
+                    # 解析 CSV
+                    if not content.strip().startswith('<'):
+                        from io import StringIO
+                        positions_df = pd.read_csv(StringIO(content))
+                        st.session_state['ibkr_positions_df'] = positions_df
+                        logger.info(f"已取得 {len(positions_df)} 筆庫存資料供策略分析")
+            except Exception as e:
+                logger.warning(f"取得庫存 DataFrame 失敗: {e}")
             
             st.toast(f"✅ 同步完成！交易：{result['trades']} 筆，庫存：{result['positions']} 個部位")
             

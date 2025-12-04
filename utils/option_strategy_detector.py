@@ -503,3 +503,93 @@ class OptionStrategyDetector:
                 strategy_info['description'] = f'包含 {len(options)} 個選擇權部位'
         
         return strategy_info
+
+    @staticmethod
+    def analyze_ibkr_positions(positions_df: pd.DataFrame) -> List[Dict]:
+        """
+        直接從 IBKR 庫存快照分析策略組合
+        
+        Args:
+            positions_df: IBKR 庫存 DataFrame，需包含欄位：
+                - AssetClass (STK/OPT)
+                - Symbol
+                - Quantity
+                - Strike (選擇權)
+                - Expiry (選擇權)
+                - Put/Call (選擇權)
+                - UnderlyingSymbol (選擇權)
+                
+        Returns:
+            strategies: 策略列表
+        """
+        if positions_df is None or positions_df.empty:
+            return []
+        
+        strategies = []
+        
+        # 分離股票和選擇權
+        stocks = positions_df[positions_df['AssetClass'] == 'STK'].copy()
+        options = positions_df[positions_df['AssetClass'] == 'OPT'].copy()
+        
+        # 建立股票持倉字典
+        stock_positions = {}
+        for _, row in stocks.iterrows():
+            symbol = row['Symbol']
+            qty = float(row['Quantity'])
+            if qty != 0:
+                stock_positions[symbol] = qty
+        
+        # 收集所有相關標的（股票 + 選擇權的 underlying）
+        all_symbols = set(stock_positions.keys())
+        if 'UnderlyingSymbol' in options.columns:
+            for underlying in options['UnderlyingSymbol'].unique():
+                if underlying and pd.notna(underlying):
+                    all_symbols.add(underlying.strip())
+        
+        # 為每個標的分析策略
+        for underlying in all_symbols:
+            strategy_info = {
+                'underlying': underlying,
+                'has_stock': underlying in stock_positions,
+                'stock_quantity': stock_positions.get(underlying, 0),
+                'options': [],
+                'strategy_type': None,
+                'strategy_name': None,
+                'description': None
+            }
+            
+            # 獲取該標的的選擇權
+            if not options.empty and 'UnderlyingSymbol' in options.columns:
+                underlying_options = options[options['UnderlyingSymbol'].str.strip() == underlying]
+                
+                for _, opt in underlying_options.iterrows():
+                    qty = float(opt['Quantity'])
+                    if qty == 0:
+                        continue
+                    
+                    # 解析到期日
+                    expiry = str(opt.get('Expiry', ''))
+                    if expiry and len(expiry) == 8:
+                        expiry = f"{expiry[:4]}-{expiry[4:6]}-{expiry[6:8]}"
+                    
+                    strategy_info['options'].append({
+                        'strike': float(opt.get('Strike', 0)),
+                        'expiry': expiry,
+                        'option_type': opt.get('Put/Call', 'C'),  # C 或 P
+                        'quantity': abs(qty),
+                        'action': 'LONG' if qty > 0 else 'SHORT',
+                        'symbol': opt.get('Symbol', '')
+                    })
+            
+            # 識別策略類型
+            strategy_info = OptionStrategyDetector._identify_combined_strategy(strategy_info)
+            
+            # 即使沒有策略也顯示（純股票持倉）
+            if strategy_info['strategy_type'] or strategy_info['has_stock']:
+                if not strategy_info['strategy_type'] and strategy_info['has_stock']:
+                    strategy_info['strategy_type'] = 'stock_only'
+                    strategy_info['strategy_name'] = '純股票持倉'
+                    strategy_info['description'] = '持有正股，無選擇權保護'
+                strategies.append(strategy_info)
+        
+        return strategies
