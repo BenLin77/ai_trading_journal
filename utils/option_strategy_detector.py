@@ -108,6 +108,30 @@ class OptionStrategyDetector:
                 {'action': 'SELL', 'option_type': 'C', 'has_stock': True}
             ],
             'description': '持有股票並賣出 Call 收取權利金'
+        },
+        'collar': {
+            'name': 'Collar（領口策略）',
+            'pattern': [
+                {'action': 'SELL', 'option_type': 'C', 'has_stock': True},
+                {'action': 'BUY', 'option_type': 'P', 'has_stock': True}
+            ],
+            'description': '持有股票 + 賣出 Call + 買入 Put，鎖定獲利區間並保護下檔風險'
+        },
+        'synthetic_long': {
+            'name': 'Synthetic Long（合成多頭）',
+            'pattern': [
+                {'action': 'BUY', 'option_type': 'C', 'strike': 'same'},
+                {'action': 'SELL', 'option_type': 'P', 'strike': 'same'}
+            ],
+            'description': '同履約價買 Call + 賣 Put，模擬持有正股'
+        },
+        'synthetic_short': {
+            'name': 'Synthetic Short（合成空頭）',
+            'pattern': [
+                {'action': 'SELL', 'option_type': 'C', 'strike': 'same'},
+                {'action': 'BUY', 'option_type': 'P', 'strike': 'same'}
+            ],
+            'description': '同履約價賣 Call + 買 Put，模擬放空正股'
         }
     }
 
@@ -280,3 +304,202 @@ class OptionStrategyDetector:
             summary += f"{i}. {action_str} {type_str} @ ${leg['strike']:.2f} x {leg['quantity']} 口（${leg['price']:.2f}/口）\n"
 
         return summary
+
+    @staticmethod
+    def synthesize_strategies_from_positions(trades: List[Dict], stock_positions: Dict[str, float] = None) -> List[Dict]:
+        """
+        從持倉資料合成策略視圖
+        
+        Args:
+            trades: 交易記錄列表
+            stock_positions: 股票持倉 {symbol: quantity}，如果為 None 則從 trades 計算
+            
+        Returns:
+            按標的分組的策略列表
+        """
+        if not trades:
+            return []
+        
+        df = pd.DataFrame(trades)
+        
+        # 如果沒有提供股票持倉，從交易記錄計算
+        if stock_positions is None:
+            stock_positions = {}
+            stock_trades = df[df.get('instrument_type', pd.Series(['stock'] * len(df))) == 'stock']
+            if len(stock_trades) > 0:
+                for symbol in stock_trades['symbol'].unique():
+                    sym_trades = stock_trades[stock_trades['symbol'] == symbol]
+                    qty = 0
+                    for _, t in sym_trades.iterrows():
+                        if t['action'].upper() in ['BUY', 'BOT']:
+                            qty += t['quantity']
+                        else:
+                            qty -= t['quantity']
+                    if qty > 0:
+                        stock_positions[symbol] = qty
+        
+        # 獲取選擇權持倉
+        option_trades = df[df.get('instrument_type', pd.Series(['stock'] * len(df))) == 'option']
+        
+        strategies = []
+        
+        # 按標的分組分析
+        all_symbols = set()
+        
+        # 從股票持倉中獲取標的
+        for sym in stock_positions.keys():
+            all_symbols.add(sym)
+        
+        # 從選擇權交易中獲取標的
+        if len(option_trades) > 0 and 'underlying' in option_trades.columns:
+            for underlying in option_trades['underlying'].unique():
+                if underlying:
+                    all_symbols.add(underlying)
+        
+        for underlying in all_symbols:
+            strategy_info = {
+                'underlying': underlying,
+                'has_stock': underlying in stock_positions,
+                'stock_quantity': stock_positions.get(underlying, 0),
+                'options': [],
+                'strategy_type': None,
+                'strategy_name': None,
+                'description': None
+            }
+            
+            # 獲取該標的的選擇權
+            if len(option_trades) > 0 and 'underlying' in option_trades.columns:
+                underlying_options = option_trades[option_trades['underlying'] == underlying]
+                
+                # 計算每個選擇權合約的淨持倉
+                option_positions = {}
+                for _, opt in underlying_options.iterrows():
+                    key = (opt.get('strike'), opt.get('expiry'), opt.get('option_type'))
+                    if key not in option_positions:
+                        option_positions[key] = {
+                            'strike': opt.get('strike'),
+                            'expiry': opt.get('expiry'),
+                            'option_type': opt.get('option_type'),
+                            'quantity': 0,
+                            'symbol': opt.get('symbol')
+                        }
+                    
+                    if opt['action'].upper() in ['BUY', 'BOT']:
+                        option_positions[key]['quantity'] += opt['quantity']
+                    else:
+                        option_positions[key]['quantity'] -= opt['quantity']
+                
+                # 只保留有持倉的選擇權
+                for key, pos in option_positions.items():
+                    if pos['quantity'] != 0:
+                        strategy_info['options'].append({
+                            'strike': pos['strike'],
+                            'expiry': pos['expiry'],
+                            'option_type': pos['option_type'],
+                            'quantity': pos['quantity'],
+                            'action': 'LONG' if pos['quantity'] > 0 else 'SHORT',
+                            'symbol': pos['symbol']
+                        })
+            
+            # 識別策略類型
+            strategy_info = OptionStrategyDetector._identify_combined_strategy(strategy_info)
+            
+            if strategy_info['strategy_type']:
+                strategies.append(strategy_info)
+        
+        return strategies
+    
+    @staticmethod
+    def _identify_combined_strategy(strategy_info: Dict) -> Dict:
+        """識別包含正股的組合策略"""
+        
+        has_stock = strategy_info['has_stock']
+        options = strategy_info['options']
+        
+        if not options and not has_stock:
+            return strategy_info
+        
+        # 分析選擇權持倉
+        long_calls = [o for o in options if o['option_type'] == 'C' and o['action'] == 'LONG']
+        short_calls = [o for o in options if o['option_type'] == 'C' and o['action'] == 'SHORT']
+        long_puts = [o for o in options if o['option_type'] == 'P' and o['action'] == 'LONG']
+        short_puts = [o for o in options if o['option_type'] == 'P' and o['action'] == 'SHORT']
+        
+        # 識別策略
+        if has_stock:
+            if short_calls and long_puts:
+                # 正股 + Sell Call + Buy Put = Collar
+                strategy_info['strategy_type'] = 'collar'
+                strategy_info['strategy_name'] = 'Collar（領口策略）'
+                strategy_info['description'] = '持有正股，賣出 Call 收取權利金，買入 Put 保護下檔'
+            elif short_calls and not long_puts:
+                # 正股 + Sell Call = Covered Call
+                strategy_info['strategy_type'] = 'covered_call'
+                strategy_info['strategy_name'] = 'Covered Call（備兌看漲）'
+                strategy_info['description'] = '持有正股並賣出 Call 收取權利金'
+            elif long_puts and not short_calls:
+                # 正股 + Buy Put = Protective Put
+                strategy_info['strategy_type'] = 'protective_put'
+                strategy_info['strategy_name'] = 'Protective Put（保護性賣權）'
+                strategy_info['description'] = '持有正股並買入 Put 保護下檔風險'
+            elif short_puts:
+                # 正股 + Sell Put = 額外加倉意圖
+                strategy_info['strategy_type'] = 'stock_with_short_put'
+                strategy_info['strategy_name'] = 'Stock + Short Put（持股賣權）'
+                strategy_info['description'] = '持有正股並賣出 Put，願意在更低價格加碼'
+            else:
+                strategy_info['strategy_type'] = 'stock_only'
+                strategy_info['strategy_name'] = '純股票持倉'
+                strategy_info['description'] = '持有正股，無選擇權保護'
+        else:
+            # 純選擇權策略
+            if long_calls and short_puts and not long_puts and not short_calls:
+                strategy_info['strategy_type'] = 'synthetic_long'
+                strategy_info['strategy_name'] = 'Synthetic Long（合成多頭）'
+                strategy_info['description'] = '買 Call + 賣 Put，合成正股多頭'
+            elif short_calls and long_puts and not long_calls and not short_puts:
+                strategy_info['strategy_type'] = 'synthetic_short'
+                strategy_info['strategy_name'] = 'Synthetic Short（合成空頭）'
+                strategy_info['description'] = '賣 Call + 買 Put，合成正股空頭'
+            elif long_calls and long_puts:
+                if len(long_calls) == 1 and len(long_puts) == 1:
+                    if long_calls[0]['strike'] == long_puts[0]['strike']:
+                        strategy_info['strategy_type'] = 'long_straddle'
+                        strategy_info['strategy_name'] = 'Long Straddle（買入跨式）'
+                        strategy_info['description'] = '同履約價買 Call + Put，賭大幅波動'
+                    else:
+                        strategy_info['strategy_type'] = 'long_strangle'
+                        strategy_info['strategy_name'] = 'Long Strangle（買入勒式）'
+                        strategy_info['description'] = '不同履約價買 Call + Put，賭大幅波動'
+            elif short_calls and short_puts:
+                if len(short_calls) == 1 and len(short_puts) == 1:
+                    if short_calls[0]['strike'] == short_puts[0]['strike']:
+                        strategy_info['strategy_type'] = 'short_straddle'
+                        strategy_info['strategy_name'] = 'Short Straddle（賣出跨式）'
+                        strategy_info['description'] = '同履約價賣 Call + Put，收取權利金'
+                    else:
+                        strategy_info['strategy_type'] = 'short_strangle'
+                        strategy_info['strategy_name'] = 'Short Strangle（賣出勒式）'
+                        strategy_info['description'] = '不同履約價賣 Call + Put，收取權利金'
+            elif long_puts and not long_calls and not short_calls and not short_puts:
+                strategy_info['strategy_type'] = 'long_put'
+                strategy_info['strategy_name'] = 'Long Put（買入賣權）'
+                strategy_info['description'] = '看跌或避險'
+            elif short_puts and not long_calls and not short_calls and not long_puts:
+                strategy_info['strategy_type'] = 'short_put'
+                strategy_info['strategy_name'] = 'Short Put（賣出賣權）'
+                strategy_info['description'] = '看不跌或願意接股'
+            elif long_calls and not long_puts and not short_calls and not short_puts:
+                strategy_info['strategy_type'] = 'long_call'
+                strategy_info['strategy_name'] = 'Long Call（買入買權）'
+                strategy_info['description'] = '看漲'
+            elif short_calls and not long_calls and not long_puts and not short_puts:
+                strategy_info['strategy_type'] = 'naked_call'
+                strategy_info['strategy_name'] = 'Naked Call（裸賣買權）'
+                strategy_info['description'] = '高風險：賣出 Call 無正股覆蓋'
+            else:
+                strategy_info['strategy_type'] = 'complex'
+                strategy_info['strategy_name'] = '複合策略'
+                strategy_info['description'] = f'包含 {len(options)} 個選擇權部位'
+        
+        return strategy_info

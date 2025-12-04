@@ -12,14 +12,20 @@ import streamlit as st
 import yfinance as yf
 from utils.ai_coach import AICoach
 from utils.derivatives_support import InstrumentParser
+from utils.styles import inject_custom_css, render_header_with_subtitle
+from config.theme import COLORS
 from datetime import datetime
 
 # 頁面配置
 st.set_page_config(
-    page_title="策略實驗室",
+    page_title="策略實驗室 | AI Trading Journal",
     page_icon="🎯",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
+
+# 注入自定義 CSS 樣式
+inject_custom_css()
 
 # 初始化 AI
 @st.cache_resource
@@ -33,9 +39,10 @@ def init_ai():
 ai_coach = init_ai()
 
 # 頁面標題
-st.title("🎯 策略實驗室")
-st.markdown("What-if 情境分析與股票/選擇權/期貨策略建議")
-st.markdown("---")
+render_header_with_subtitle(
+    title="🎯 策略實驗室",
+    subtitle="What-if 情境分析與股票/選擇權/期貨策略建議"
+)
 
 # 警告
 if ai_coach is None:

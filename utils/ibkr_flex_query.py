@@ -78,7 +78,7 @@ class IBKRFlexQuery:
             reference_code: 報表參考碼
 
         Returns:
-            xml_content: 報表 XML 內容
+            content: 報表內容（XML 或 CSV）
         """
         url = f"{self.BASE_URL}/FlexStatementService.GetStatement"
         params = {
@@ -102,6 +102,83 @@ class IBKRFlexQuery:
 
         except requests.exceptions.RequestException as e:
             raise Exception(f"網路請求失敗: {str(e)}")
+
+    def _detect_format(self, content: str) -> str:
+        """
+        偵測報表格式 (XML 或 CSV)
+        
+        Returns:
+            'xml' 或 'csv'
+        """
+        content_stripped = content.strip()
+        if content_stripped.startswith('<?xml') or content_stripped.startswith('<'):
+            return 'xml'
+        return 'csv'
+
+    def _parse_trades_csv(self, csv_content: str) -> List[Dict]:
+        """
+        解析交易記錄 CSV
+        
+        Args:
+            csv_content: Flex Query 回傳的 CSV
+            
+        Returns:
+            trades: 交易記錄列表
+        """
+        from io import StringIO
+        
+        try:
+            df = pd.read_csv(StringIO(csv_content))
+        except Exception as e:
+            raise Exception(f"CSV 解析失敗: {str(e)}")
+        
+        trades = []
+        for _, row in df.iterrows():
+            # 處理日期時間
+            date_time = None
+            if 'Date/Time' in row:
+                date_time = str(row['Date/Time'])
+            elif 'TradeDate' in row:
+                trade_date = str(row['TradeDate'])
+                trade_time = str(row.get('TradeTime', ''))
+                if trade_date and len(trade_date) == 8:
+                    # 格式: YYYYMMDD
+                    date_time = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}"
+                    if trade_time:
+                        date_time += f" {trade_time}"
+                else:
+                    date_time = trade_date
+            
+            # 判斷買賣方向
+            quantity = float(row.get('Quantity', 0))
+            buy_sell = str(row.get('Buy/Sell', ''))
+            if buy_sell.upper() == 'SELL' or quantity < 0:
+                quantity = -abs(quantity)
+            else:
+                quantity = abs(quantity)
+            
+            trade_data = {
+                'symbol': str(row.get('Symbol', '')),
+                'date_time': date_time,
+                'quantity': quantity,
+                'price': float(row.get('TradePrice', row.get('Price', 0))),
+                'proceeds': float(row.get('Proceeds', 0)),
+                'commission': float(row.get('IBCommission', row.get('Commission', 0))),
+                'net_cash': float(row.get('NetCash', 0)),
+                'asset_category': str(row.get('AssetClass', 'STK')),
+                'description': str(row.get('Description', '')),
+                # 選擇權相關欄位
+                'put_call': str(row.get('Put/Call', '')),
+                'strike': str(row.get('Strike', '')),
+                'expiry': str(row.get('Expiry', '')),
+                'multiplier': str(row.get('Multiplier', '1')),
+                'underlying': str(row.get('UnderlyingSymbol', '')),
+                # 損益欄位（如果有）
+                'realized_pnl': float(row.get('FifoPnlRealized', row.get('RealizedPnL', 0))),
+            }
+            trades.append(trade_data)
+        
+        return trades
 
     def _parse_trades_xml(self, xml_content: str) -> List[Dict]:
         """
@@ -188,10 +265,14 @@ class IBKRFlexQuery:
         reference_code = self._request_report(self.trades_query_id)
 
         # Step 2: 取得報表
-        xml_content = self._get_report(reference_code)
+        content = self._get_report(reference_code)
 
-        # Step 3: 解析 XML
-        trades = self._parse_trades_xml(xml_content)
+        # Step 3: 偵測格式並解析
+        format_type = self._detect_format(content)
+        if format_type == 'csv':
+            trades = self._parse_trades_csv(content)
+        else:
+            trades = self._parse_trades_xml(content)
 
         if not trades:
             return pd.DataFrame()
@@ -199,8 +280,8 @@ class IBKRFlexQuery:
         df = pd.DataFrame(trades)
 
         # 日期篩選
-        if date:
-            df['date'] = pd.to_datetime(df['date_time']).dt.date.astype(str)
+        if date and 'date_time' in df.columns:
+            df['date'] = pd.to_datetime(df['date_time'], errors='coerce').dt.date.astype(str)
             df = df[df['date'] == date]
 
         return df

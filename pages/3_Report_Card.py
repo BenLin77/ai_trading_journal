@@ -18,13 +18,19 @@ from utils.charts import (
 )
 from utils.ai_coach import AICoach
 from utils.derivatives_support import DerivativesAnalyzer
+from utils.styles import inject_custom_css, render_header_with_subtitle
+from config.theme import COLORS
 
 # 頁面配置
 st.set_page_config(
-    page_title="績效成績單",
+    page_title="績效成績單 | AI Trading Journal",
     page_icon="📊",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
+
+# 注入自定義 CSS 樣式
+inject_custom_css()
 
 # 初始化
 @st.cache_resource
@@ -40,9 +46,10 @@ def init_components():
 db, ai_coach = init_components()
 
 # 頁面標題
-st.title("📊 我的交易成績單")
-st.markdown("長期績效追蹤與 AI 改進建議")
-st.markdown("---")
+render_header_with_subtitle(
+    title="📊 績效成績單",
+    subtitle="長期績效追蹤與 AI 改進建議"
+)
 
 # 載入全局統計數據
 stats = db.get_trade_statistics()

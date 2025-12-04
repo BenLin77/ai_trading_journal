@@ -17,13 +17,19 @@ from utils.analysis import TradingAnalyzer
 from utils.charts import create_trading_chart
 from utils.ai_coach import AICoach
 from utils.derivatives_support import InstrumentParser, DerivativesAnalyzer
+from utils.styles import inject_custom_css, render_header_with_subtitle
+from config.theme import COLORS
 
 # 頁面配置
 st.set_page_config(
-    page_title="交易檢討",
+    page_title="交易檢討 | AI Trading Journal",
     page_icon="📈",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
+
+# 注入自定義 CSS 樣式
+inject_custom_css()
 
 # 初始化
 @st.cache_resource
@@ -40,13 +46,14 @@ def init_components():
 db, analyzer, ai_coach = init_components()
 
 # 頁面標題
-st.title("📈 交易檢討")
-st.markdown("與 AI 教練深度分析你的交易決策")
-st.markdown("---")
+render_header_with_subtitle(
+    title="📈 交易檢討",
+    subtitle="與 AI 教練深度分析你的交易決策"
+)
 
 # 警告：未設定 API Key
 if ai_coach is None:
-    st.warning("⚠️ 未偵測到 GEMINI_API_KEY，AI 對話功能將無法使用。請在 `.env` 檔案中設定。")
+    st.warning("⚠️ 未偵測到 AI API Key，AI 對話功能將無法使用。請在 `.env` 設定 `DEEPSEEK_API_KEY` 或 `GEMINI_API_KEY`。")
 
 # 左側控制面板
 with st.sidebar:
@@ -59,22 +66,37 @@ with st.sidebar:
         st.error("❌ 資料庫中沒有交易紀錄，請先在主頁面上傳 CSV 檔案")
         st.stop()
 
-    # 標的選擇
-    selected_symbol = st.selectbox(
-        "標的代號",
-        symbols,
-        help="選擇要檢討的標的（股票/選擇權/期貨）"
+    # 檢討模式選擇
+    review_mode = st.radio(
+        "檢討模式",
+        ["📊 單一標的", "📋 全部標的總覽"],
+        horizontal=True,
+        help="選擇檢討單一標的或所有標的"
     )
+    
+    is_all_symbols_mode = review_mode == "📋 全部標的總覽"
 
-    # 解析標的類型
-    parsed_symbol = InstrumentParser.parse_symbol(selected_symbol)
+    # 標的選擇（僅在單一標的模式顯示）
+    if not is_all_symbols_mode:
+        selected_symbol = st.selectbox(
+            "標的代號",
+            symbols,
+            help="選擇要檢討的標的（股票/選擇權/期貨）"
+        )
 
-    if parsed_symbol['instrument_type'] != 'stock':
-        st.info(f"📊 {parsed_symbol['instrument_type'].upper()}: {parsed_symbol['underlying']}")
-        if parsed_symbol['instrument_type'] == 'option':
-            st.caption(f"Strike: ${parsed_symbol['strike']}, Expiry: {parsed_symbol['expiry']}, Type: {parsed_symbol['option_type']}")
-        elif parsed_symbol['instrument_type'] == 'futures':
-            st.caption(f"Expiry: {parsed_symbol['expiry']}, Multiplier: {parsed_symbol['multiplier']}")
+        # 解析標的類型
+        parsed_symbol = InstrumentParser.parse_symbol(selected_symbol)
+
+        if parsed_symbol['instrument_type'] != 'stock':
+            st.info(f"📊 {parsed_symbol['instrument_type'].upper()}: {parsed_symbol['underlying']}")
+            if parsed_symbol['instrument_type'] == 'option':
+                st.caption(f"Strike: ${parsed_symbol['strike']}, Expiry: {parsed_symbol['expiry']}, Type: {parsed_symbol['option_type']}")
+            elif parsed_symbol['instrument_type'] == 'futures':
+                st.caption(f"Expiry: {parsed_symbol['expiry']}, Multiplier: {parsed_symbol['multiplier']}")
+    else:
+        selected_symbol = None
+        parsed_symbol = None
+        st.info(f"📊 將分析所有 {len(symbols)} 個標的")
 
     # 日期範圍
     date_range = st.date_input(
@@ -90,13 +112,16 @@ with st.sidebar:
         st.warning("請選擇完整的日期範圍")
         st.stop()
 
-    # K 線週期
-    interval = st.selectbox(
-        "K 線週期",
-        ['1m', '5m', '15m', '30m', '1h', '1d'],
-        index=5,
-        help="選擇 K 線的時間週期"
-    )
+    # K 線週期（僅在單一標的模式顯示）
+    if not is_all_symbols_mode:
+        interval = st.selectbox(
+            "K 線週期",
+            ['1m', '5m', '15m', '30m', '1h', '1d'],
+            index=5,
+            help="選擇 K 線的時間週期"
+        )
+    else:
+        interval = '1d'  # 全部標的模式預設使用日線
 
     # 載入按鈕
     load_button = st.button("📊 載入數據", type="primary")
@@ -107,415 +132,575 @@ if load_button:
     progress_bar = st.progress(0)
     status_text = st.empty()
 
-    try:
-        # 步驟 1: 從資料庫載入交易紀錄
-        status_text.text("📂 步驟 1/4：載入交易紀錄...")
-        progress_bar.progress(0.25)
-
-        trades = db.get_trades(
-            symbol=selected_symbol,
-            start_date=start_date,
-            end_date=end_date
-        )
-
-        if not trades:
-            progress_bar.empty()
-            status_text.empty()
-            st.error(f"在 {start_date} 到 {end_date} 期間沒有 {selected_symbol} 的交易紀錄")
-            st.stop()
-
-        trades_df = pd.DataFrame(trades)
-        trades_df['datetime'] = pd.to_datetime(trades_df['datetime'])
-
-        # 步驟 2: 從 yfinance 抓取 K 線數據
-        # 如果是選擇權/期貨，使用 underlying symbol
-        underlying_symbol = parsed_symbol['underlying']
-        is_derivative = parsed_symbol['instrument_type'] != 'stock'
-
-        status_text.text(f"📈 步驟 2/4：抓取 {underlying_symbol} K 線數據...")
-        progress_bar.progress(0.50)
-
-        ticker = yf.Ticker(underlying_symbol)
-
-        # 調整日期範圍（擴展幾天以獲得更完整的數據）
-        extended_start = (datetime.strptime(start_date, '%Y-%m-%d') - timedelta(days=5)).strftime('%Y-%m-%d')
-        extended_end = (datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
-
-        ohlc_df = ticker.history(
-            start=extended_start,
-            end=extended_end,
-            interval=interval
-        )
-
-        if ohlc_df.empty:
-            progress_bar.empty()
-            status_text.empty()
-            st.error(f"無法取得 {underlying_symbol} 的 K 線數據")
-            st.info("""
-            **可能原因：**
-            - 標的代號錯誤（請使用美股代號，例如 AAPL）
-            - 日期範圍無可用數據
-            - yfinance API 暫時無法連接
-            """)
-            st.stop()
-
-        # 重置索引並重命名欄位（動態處理，避免列數不匹配）
-        ohlc_df = ohlc_df.reset_index()
-        
-        # 確保有必要的欄位
-        required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-        if not all(col in ohlc_df.columns for col in required_columns):
-            st.error(f"數據缺少必要欄位。可用欄位：{list(ohlc_df.columns)}")
-            st.stop()
-        
-        # 重新命名為小寫（統一格式）
-        column_mapping = {
-            'Date': 'datetime',
-            'Open': 'open',
-            'High': 'high',
-            'Low': 'low',
-            'Close': 'close',
-            'Volume': 'volume'
-        }
-        ohlc_df = ohlc_df.rename(columns=column_mapping)
-        
-        # 只保留需要的欄位
-        ohlc_df = ohlc_df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
-
-    except Exception as e:
-        progress_bar.empty()
-        status_text.empty()
-        st.error(f"載入數據時發生錯誤：{str(e)}")
-        with st.expander("查看詳細錯誤"):
-            st.code(str(e))
-        st.stop()
-
-    # 步驟 3: Python 規則引擎分析
-    status_text.text("🔍 步驟 3/4：分析交易模式...")
-    progress_bar.progress(0.75)
-
-    issues = analyzer.analyze_trades_with_bars(trades_df, ohlc_df)
-
-    # 步驟 4: 生成圖表
-    status_text.text("📊 步驟 4/4：生成互動圖表...")
-    progress_bar.progress(0.95)
-
-    fig = create_trading_chart(ohlc_df, trades_df, selected_symbol)
-
-    # 完成
-    progress_bar.progress(1.0)
-    status_text.text("✅ 載入完成！")
-
-    import time
-    time.sleep(0.5)
-
-    # 清除進度指示
-    progress_bar.empty()
-    status_text.empty()
-
-    # 顯示成功訊息
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.success(f"✅ 載入了 {len(trades_df)} 筆交易紀錄")
-    with col2:
-        st.success(f"✅ 載入了 {len(ohlc_df)} 根 K 棒")
-    with col3:
-        if is_derivative:
-            st.info(f"📊 {parsed_symbol['instrument_type'].upper()}")
-        else:
-            st.info("📈 股票交易")
-
-    # 顯示分析結果
-    st.subheader("🔍 交易行為與心理分析")
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-        st.metric(
-            "疑似 FOMO (追高)",
-            issues['summary']['total_chasing'],
-            delta=None,
-            delta_color="inverse"
-        )
-
-    with col2:
-        st.metric(
-            "疑似恐慌 (殺低)",
-            issues['summary']['total_panic_selling'],
-            delta=None,
-            delta_color="inverse"
-        )
-
-    with col3:
-        st.metric(
-            "高風險接刀",
-            issues['summary']['total_poor_timing'],
-            delta=None,
-            delta_color="inverse"
-        )
-
-    with col4:
-        st.metric(
-            "總警示",
-            issues['summary']['total_issues'],
-            delta=None,
-            delta_color="inverse"
-        )
-
-    if issues['summary']['total_issues'] > 0:
-        with st.expander("⚠️ 查看詳細分析"):
-            if issues['chasing_price']:
-                st.write("**🔥 疑似 FOMO / 追高：**")
-                for issue in issues['chasing_price']:
-                    st.write(f"- {issue['message']}")
-
-            if issues['panic_selling']:
-                st.write("**❄️ 疑似恐慌 / 殺低：**")
-                for issue in issues['panic_selling']:
-                    st.write(f"- {issue['message']}")
+    # ========== 全部標的總覽模式 ==========
+    if is_all_symbols_mode:
+        try:
+            status_text.text("📂 載入所有交易紀錄...")
+            progress_bar.progress(0.20)
             
-            if issues['poor_timing']:
-                st.write("**🔪 高風險操作：**")
-                for issue in issues['poor_timing']:
-                    st.write(f"- {issue['message']}")
-
-    # 衍生品資訊摘要（如果適用）
-    if is_derivative:
-        st.markdown("---")
-        st.subheader("📐 衍生品資訊")
-
-        if parsed_symbol['instrument_type'] == 'option':
+            # 載入所有交易
+            all_trades = db.get_trades(start_date=start_date, end_date=end_date)
+            
+            if not all_trades:
+                progress_bar.empty()
+                status_text.empty()
+                st.error(f"在 {start_date} 到 {end_date} 期間沒有任何交易紀錄")
+                st.stop()
+            
+            all_trades_df = pd.DataFrame(all_trades)
+            all_trades_df['datetime'] = pd.to_datetime(all_trades_df['datetime'])
+            
+            progress_bar.progress(0.40)
+            status_text.text("📊 計算各標的績效...")
+            
+            # 按標的分組統計
+            symbol_stats = all_trades_df.groupby('symbol').agg({
+                'realized_pnl': ['sum', 'count', 'mean'],
+                'quantity': 'sum',
+                'datetime': ['min', 'max']
+            }).round(2)
+            
+            symbol_stats.columns = ['總損益', '交易次數', '平均損益', '總數量', '首次交易', '最後交易']
+            symbol_stats = symbol_stats.sort_values('總損益', ascending=False)
+            
+            # 計算勝率
+            def calc_win_rate(group):
+                wins = (group['realized_pnl'] > 0).sum()
+                total = len(group)
+                return round(wins / total * 100, 1) if total > 0 else 0
+            
+            win_rates = all_trades_df.groupby('symbol').apply(calc_win_rate)
+            symbol_stats['勝率 (%)'] = win_rates
+            
+            progress_bar.progress(0.60)
+            status_text.empty()
+            progress_bar.empty()
+            
+            # 顯示總覽
+            st.markdown("## 📋 全部標的總覽")
+            st.markdown(f"**分析期間**: {start_date} ~ {end_date}")
+            
+            # KPI 卡片
             col1, col2, col3, col4 = st.columns(4)
+            total_pnl = symbol_stats['總損益'].sum()
+            total_trades_count = symbol_stats['交易次數'].sum()
+            avg_win_rate = symbol_stats['勝率 (%)'].mean()
+            
             with col1:
-                st.metric("標的", parsed_symbol['underlying'])
+                st.metric("總盈虧", f"${total_pnl:,.2f}", delta_color="normal")
             with col2:
-                st.metric("Strike", f"${parsed_symbol['strike']}")
+                st.metric("交易標的數", len(symbol_stats))
             with col3:
-                st.metric("到期日", parsed_symbol['expiry'])
+                st.metric("總交易次數", int(total_trades_count))
             with col4:
-                st.metric("類型", parsed_symbol['option_type'])
-
-            # 計算總權利金
-            total_premium = (trades_df['price'] * trades_df['quantity'] * parsed_symbol['multiplier']).sum()
-            st.info(f"💰 總權利金：${total_premium:,.2f}")
-
-        elif parsed_symbol['instrument_type'] == 'futures':
-            col1, col2, col3 = st.columns(3)
+                st.metric("平均勝率", f"{avg_win_rate:.1f}%")
+            
+            st.markdown("---")
+            
+            # 分類顯示：獲利標的 vs 虧損標的
+            col1, col2 = st.columns(2)
+            
             with col1:
-                st.metric("標的", parsed_symbol['underlying'])
-            with col2:
-                st.metric("到期日", parsed_symbol['expiry'])
-            with col3:
-                st.metric("合約倍數", parsed_symbol['multiplier'])
-
-            # 計算名義價值
-            notional_value = (trades_df['price'] * trades_df['quantity'] * parsed_symbol['multiplier']).sum()
-            st.info(f"💰 名義價值：${notional_value:,.2f}")
-
-    # 4. 繪製圖表
-    st.subheader("📊 交易檢討圖")
-    if is_derivative:
-        st.caption(f"圖表顯示 {underlying_symbol} 的 K 線（{parsed_symbol['instrument_type']} 的標的資產）")
-
-    fig = create_trading_chart(ohlc_df, trades_df, underlying_symbol)
-    st.plotly_chart(fig, use_container_width=True)
-
-    # 5. AI 教練對話區
-    st.markdown("---")
-    st.subheader("💬 AI 教練對話")
-
-    if ai_coach is None:
-        st.info("AI 對話功能需要設定 GEMINI_API_KEY")
-    else:
-        # 檢查是否切換了標的，如果是則重置對話
-        if st.session_state.get('last_review_symbol') != selected_symbol:
-            st.session_state.last_review_symbol = selected_symbol
-            st.session_state.chat_messages = []
-            # 清除舊的 session_id 以便生成新的
-            if 'session_id' in st.session_state:
-                del st.session_state.session_id
-
-        # 生成會話 ID (如果不存在)
-        if 'session_id' not in st.session_state:
-            st.session_state.session_id = f"{selected_symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-        # 初始化對話 (如果為空)
-        if not st.session_state.chat_messages:
-            with st.spinner("AI 教練正在分析交易數據..."):
-                # AI 首次提問
-                analysis_context = analyzer.generate_ai_prompt_context(issues)
-
-                # 加入衍生品資訊到摘要
-                if is_derivative:
-                    instrument_info = f"{parsed_symbol['instrument_type'].upper()}: {selected_symbol}"
-                    if parsed_symbol['instrument_type'] == 'option':
-                        instrument_info += f" (Strike ${parsed_symbol['strike']}, {parsed_symbol['option_type']})"
-                    trade_summary = f"{len(trades_df)} 筆{parsed_symbol['instrument_type']}交易，總盈虧：${trades_df['realized_pnl'].sum():.2f}"
+                st.markdown("### 🟢 獲利標的")
+                winners = symbol_stats[symbol_stats['總損益'] > 0].copy()
+                if len(winners) > 0:
+                    st.dataframe(
+                        winners[['總損益', '交易次數', '勝率 (%)', '平均損益']].style.format({
+                            '總損益': '${:,.2f}',
+                            '平均損益': '${:,.2f}',
+                            '勝率 (%)': '{:.1f}%'
+                        }),
+                        use_container_width=True
+                    )
                 else:
-                    instrument_info = f"股票: {selected_symbol}"
-                    trade_summary = f"{len(trades_df)} 筆交易，總盈虧：${trades_df['realized_pnl'].sum():.2f}"
-
-                ohlc_summary = f"K 線數據：{len(ohlc_df)} 根，週期 {interval}"
-
-                # 取得過去的記憶 (Long-term Memory)
-                try:
-                    global_history = db.get_global_chat_history(limit=30)
-                    formatted_history = ""
-                    if global_history:
-                        formatted_history = "--- 過去對話紀錄 ---\n"
-                        for msg in global_history:
-                            role = "User" if msg['role'] == 'user' else "AI Coach"
-                            formatted_history += f"{role}: {msg['content']}\n"
-                        formatted_history += "--- 紀錄結束 ---\n"
-                except Exception:
-                    formatted_history = ""
-
-                try:
-                    ai_first_message = ai_coach.start_review_session(
-                        analysis_context=analysis_context,
-                        trade_data=trade_summary,
-                        ohlc_summary=ohlc_summary,
-                        global_context=formatted_history
+                    st.info("沒有獲利標的")
+            
+            with col2:
+                st.markdown("### 🔴 虧損標的")
+                losers = symbol_stats[symbol_stats['總損益'] < 0].copy()
+                if len(losers) > 0:
+                    st.dataframe(
+                        losers[['總損益', '交易次數', '勝率 (%)', '平均損益']].style.format({
+                            '總損益': '${:,.2f}',
+                            '平均損益': '${:,.2f}',
+                            '勝率 (%)': '{:.1f}%'
+                        }),
+                        use_container_width=True
                     )
+                else:
+                    st.info("沒有虧損標的")
+            
+            st.markdown("---")
+            
+            # AI 綜合檢討
+            st.markdown("### 🤖 AI 綜合檢討")
+            
+            if ai_coach is not None:
+                if st.button("🧠 開始 AI 綜合分析", type="primary"):
+                    with st.spinner("AI 正在分析所有交易..."):
+                        # 準備分析數據
+                        summary_for_ai = f"""
+## 交易總覽分析請求
 
-                    st.session_state.chat_messages.append({
-                        'role': 'assistant',
-                        'content': ai_first_message
-                    })
+**分析期間**: {start_date} ~ {end_date}
+**總盈虧**: ${total_pnl:,.2f}
+**交易標的數**: {len(symbol_stats)}
+**總交易次數**: {int(total_trades_count)}
 
-                    # 儲存到資料庫
-                    db.add_chat_message(
-                        session_id=st.session_state.session_id,
-                        role='assistant',
-                        content=ai_first_message
-                    )
+### 各標的績效摘要：
+"""
+                        for symbol, row in symbol_stats.iterrows():
+                            pnl_status = "✅ 獲利" if row['總損益'] > 0 else "❌ 虧損" if row['總損益'] < 0 else "➖ 持平"
+                            summary_for_ai += f"\n- **{symbol}**: {pnl_status} ${row['總損益']:,.2f} | 交易 {int(row['交易次數'])} 次 | 勝率 {row['勝率 (%)']:.1f}%"
+                        
+                        prompt = f"""
+你是一位資深交易教練。請基於以下交易總覽，提供全面的投資組合檢討：
 
-                except Exception as e:
-                    st.error(f"AI 初始化失敗：{str(e)}")
-                    # 即使失敗，也允許用戶手動開始對話
-                    st.session_state.chat_messages.append({
-                        'role': 'assistant',
-                        'content': "抱歉，自動分析暫時無法使用。請直接告訴我你想檢討什麼？"
-                    })
+{summary_for_ai}
 
-        # 顯示對話歷史
-        for msg in st.session_state.chat_messages:
-            with st.chat_message(msg['role']):
-                st.write(msg['content'])
+請提供：
+1. **整體評估**：對這段期間的交易表現給予綜合評價
+2. **強項分析**：指出表現最好的標的，分析成功原因
+3. **弱項診斷**：找出表現最差的標的，分析問題所在
+4. **資金配置建議**：基於績效，建議如何調整各標的的資金比例
+5. **風險警示**：標記需要特別注意的標的或交易模式
+6. **3 個具體改進行動**：可立即執行的改進建議
 
-        # 使用者輸入
-        user_input = st.chat_input("分享你當時的想法...")
+請用繁體中文回答，語言直接、具體。
+"""
+                        
+                        response = ai_coach.chat(prompt)
+                        st.markdown(response)
+                        
+                        # 儲存到 session state
+                        st.session_state['all_symbols_ai_review'] = response
+            else:
+                st.warning("⚠️ AI 功能未啟用，無法進行綜合檢討")
+            
+            # 如果有之前的分析結果，顯示
+            if 'all_symbols_ai_review' in st.session_state:
+                with st.expander("📋 上次 AI 分析結果", expanded=False):
+                    st.markdown(st.session_state['all_symbols_ai_review'])
+            
+        except Exception as e:
+            progress_bar.empty()
+            status_text.empty()
+            st.error(f"❌ 載入失敗：{str(e)}")
+            import traceback
+            st.code(traceback.format_exc())
+    
+    # ========== 單一標的模式 ==========
+    else:
+        try:
+            # 步驟 1: 從資料庫載入交易紀錄
+            status_text.text("📂 步驟 1/4：載入交易紀錄...")
+            progress_bar.progress(0.25)
 
-        if user_input:
-            # 加入使用者訊息
-            st.session_state.chat_messages.append({
-                'role': 'user',
-                'content': user_input
-            })
-
-            db.add_chat_message(
-                session_id=st.session_state.session_id,
-                role='user',
-                content=user_input
+            trades = db.get_trades(
+                symbol=selected_symbol,
+                start_date=start_date,
+                end_date=end_date
             )
 
-            # 顯示使用者訊息
-            with st.chat_message('user'):
-                st.write(user_input)
+            if not trades:
+                progress_bar.empty()
+                status_text.empty()
+                st.error(f"在 {start_date} 到 {end_date} 期間沒有 {selected_symbol} 的交易紀錄")
+                st.stop()
 
-            # 取得 AI 回應
-            try:
-                ai_response = ai_coach.continue_conversation(
-                    chat_history=st.session_state.chat_messages[:-1],
-                    user_message=user_input
-                )
+            trades_df = pd.DataFrame(trades)
+            trades_df['datetime'] = pd.to_datetime(trades_df['datetime'])
 
+            # 步驟 2: 從 yfinance 抓取 K 線數據
+            # 如果是選擇權/期貨，使用 underlying symbol
+            underlying_symbol = parsed_symbol['underlying']
+            is_derivative = parsed_symbol['instrument_type'] != 'stock'
+
+            status_text.text(f"📈 步驟 2/4：抓取 {underlying_symbol} K 線數據...")
+            progress_bar.progress(0.50)
+
+            ticker = yf.Ticker(underlying_symbol)
+
+            # 調整日期範圍（擴展幾天以獲得更完整的數據）
+            extended_start = (datetime.strptime(start_date, '%Y-%m-%d') - timedelta(days=5)).strftime('%Y-%m-%d')
+            extended_end = (datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+
+            ohlc_df = ticker.history(
+                start=extended_start,
+                end=extended_end,
+                interval=interval
+            )
+
+            if ohlc_df.empty:
+                progress_bar.empty()
+                status_text.empty()
+                st.error(f"無法取得 {underlying_symbol} 的 K 線數據")
+                st.info("""
+                **可能原因：**
+                - 標的代號錯誤（請使用美股代號，例如 AAPL）
+                - 日期範圍無可用數據
+                - yfinance API 暫時無法連接
+                """)
+                st.stop()
+
+            # 重置索引並重命名欄位（動態處理，避免列數不匹配）
+            ohlc_df = ohlc_df.reset_index()
+            
+            # 確保有必要的欄位
+            required_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+            if not all(col in ohlc_df.columns for col in required_columns):
+                st.error(f"數據缺少必要欄位。可用欄位：{list(ohlc_df.columns)}")
+                st.stop()
+            
+            # 重新命名為小寫（統一格式）
+            column_mapping = {
+                'Date': 'datetime',
+                'Open': 'open',
+                'High': 'high',
+                'Low': 'low',
+                'Close': 'close',
+                'Volume': 'volume'
+            }
+            ohlc_df = ohlc_df.rename(columns=column_mapping)
+            
+            # 只保留需要的欄位
+            ohlc_df = ohlc_df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
+
+        except Exception as e:
+            progress_bar.empty()
+            status_text.empty()
+            st.error(f"載入數據時發生錯誤：{str(e)}")
+            with st.expander("查看詳細錯誤"):
+                st.code(str(e))
+            st.stop()
+
+        # 步驟 3: Python 規則引擎分析
+        status_text.text("🔍 步驟 3/4：分析交易模式...")
+        progress_bar.progress(0.75)
+
+        issues = analyzer.analyze_trades_with_bars(trades_df, ohlc_df)
+
+        # 步驟 4: 生成圖表
+        status_text.text("📊 步驟 4/4：生成互動圖表...")
+        progress_bar.progress(0.95)
+
+        fig = create_trading_chart(ohlc_df, trades_df, selected_symbol)
+
+        # 完成
+        progress_bar.progress(1.0)
+        status_text.text("✅ 載入完成！")
+
+        import time
+        time.sleep(0.5)
+
+        # 清除進度指示
+        progress_bar.empty()
+        status_text.empty()
+
+        # 顯示成功訊息
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.success(f"✅ 載入了 {len(trades_df)} 筆交易紀錄")
+        with col2:
+            st.success(f"✅ 載入了 {len(ohlc_df)} 根 K 棒")
+        with col3:
+            if is_derivative:
+                st.info(f"📊 {parsed_symbol['instrument_type'].upper()}")
+            else:
+                st.info("📈 股票交易")
+
+        # 顯示分析結果
+        st.subheader("🔍 交易行為與心理分析")
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            st.metric(
+                "疑似 FOMO (追高)",
+                issues['summary']['total_chasing'],
+                delta=None,
+                delta_color="inverse"
+            )
+
+        with col2:
+            st.metric(
+                "疑似恐慌 (殺低)",
+                issues['summary']['total_panic_selling'],
+                delta=None,
+                delta_color="inverse"
+            )
+
+        with col3:
+            st.metric(
+                "高風險接刀",
+                issues['summary']['total_poor_timing'],
+                delta=None,
+                delta_color="inverse"
+            )
+
+        with col4:
+            st.metric(
+                "總警示",
+                issues['summary']['total_issues'],
+                delta=None,
+                delta_color="inverse"
+            )
+
+        if issues['summary']['total_issues'] > 0:
+            with st.expander("⚠️ 查看詳細分析"):
+                if issues['chasing_price']:
+                    st.write("**🔥 疑似 FOMO / 追高：**")
+                    for issue in issues['chasing_price']:
+                        st.write(f"- {issue['message']}")
+
+                if issues['panic_selling']:
+                    st.write("**❄️ 疑似恐慌 / 殺低：**")
+                    for issue in issues['panic_selling']:
+                        st.write(f"- {issue['message']}")
+                
+                if issues['poor_timing']:
+                    st.write("**🔪 高風險操作：**")
+                    for issue in issues['poor_timing']:
+                        st.write(f"- {issue['message']}")
+
+        # 衍生品資訊摘要（如果適用）
+        if is_derivative:
+            st.markdown("---")
+            st.subheader("📐 衍生品資訊")
+
+            if parsed_symbol['instrument_type'] == 'option':
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("標的", parsed_symbol['underlying'])
+                with col2:
+                    st.metric("Strike", f"${parsed_symbol['strike']}")
+                with col3:
+                    st.metric("到期日", parsed_symbol['expiry'])
+                with col4:
+                    st.metric("類型", parsed_symbol['option_type'])
+
+                # 計算總權利金
+                total_premium = (trades_df['price'] * trades_df['quantity'] * parsed_symbol['multiplier']).sum()
+                st.info(f"💰 總權利金：${total_premium:,.2f}")
+
+            elif parsed_symbol['instrument_type'] == 'futures':
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("標的", parsed_symbol['underlying'])
+                with col2:
+                    st.metric("到期日", parsed_symbol['expiry'])
+                with col3:
+                    st.metric("合約倍數", parsed_symbol['multiplier'])
+
+                # 計算名義價值
+                notional_value = (trades_df['price'] * trades_df['quantity'] * parsed_symbol['multiplier']).sum()
+                st.info(f"💰 名義價值：${notional_value:,.2f}")
+
+        # 4. 繪製圖表
+        st.subheader("📊 交易檢討圖")
+        if is_derivative:
+            st.caption(f"圖表顯示 {underlying_symbol} 的 K 線（{parsed_symbol['instrument_type']} 的標的資產）")
+
+        fig = create_trading_chart(ohlc_df, trades_df, underlying_symbol)
+        st.plotly_chart(fig, use_container_width=True)
+
+        # 5. AI 教練對話區
+        st.markdown("---")
+        st.subheader("💬 AI 教練對話")
+
+        if ai_coach is None:
+            st.info("AI 對話功能需要設定 DEEPSEEK_API_KEY 或 GEMINI_API_KEY")
+        else:
+            # 檢查是否切換了標的，如果是則重置對話
+            if st.session_state.get('last_review_symbol') != selected_symbol:
+                st.session_state.last_review_symbol = selected_symbol
+                st.session_state.chat_messages = []
+                # 清除舊的 session_id 以便生成新的
+                if 'session_id' in st.session_state:
+                    del st.session_state.session_id
+
+            # 生成會話 ID (如果不存在)
+            if 'session_id' not in st.session_state:
+                st.session_state.session_id = f"{selected_symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+            # 初始化對話 (如果為空)
+            if not st.session_state.chat_messages:
+                with st.spinner("AI 教練正在分析交易數據..."):
+                    # AI 首次提問
+                    analysis_context = analyzer.generate_ai_prompt_context(issues)
+
+                    # 加入衍生品資訊到摘要
+                    if is_derivative:
+                        instrument_info = f"{parsed_symbol['instrument_type'].upper()}: {selected_symbol}"
+                        if parsed_symbol['instrument_type'] == 'option':
+                            instrument_info += f" (Strike ${parsed_symbol['strike']}, {parsed_symbol['option_type']})"
+                        trade_summary = f"{len(trades_df)} 筆{parsed_symbol['instrument_type']}交易，總盈虧：${trades_df['realized_pnl'].sum():.2f}"
+                    else:
+                        instrument_info = f"股票: {selected_symbol}"
+                        trade_summary = f"{len(trades_df)} 筆交易，總盈虧：${trades_df['realized_pnl'].sum():.2f}"
+
+                    ohlc_summary = f"K 線數據：{len(ohlc_df)} 根，週期 {interval}"
+
+                    # 取得過去的記憶 (Long-term Memory)
+                    try:
+                        global_history = db.get_global_chat_history(limit=30)
+                        formatted_history = ""
+                        if global_history:
+                            formatted_history = "--- 過去對話紀錄 ---\n"
+                            for msg in global_history:
+                                role = "User" if msg['role'] == 'user' else "AI Coach"
+                                formatted_history += f"{role}: {msg['content']}\n"
+                            formatted_history += "--- 紀錄結束 ---\n"
+                    except Exception:
+                        formatted_history = ""
+
+                    try:
+                        ai_first_message = ai_coach.start_review_session(
+                            analysis_context=analysis_context,
+                            trade_data=trade_summary,
+                            ohlc_summary=ohlc_summary,
+                            global_context=formatted_history
+                        )
+
+                        st.session_state.chat_messages.append({
+                            'role': 'assistant',
+                            'content': ai_first_message
+                        })
+
+                        # 儲存到資料庫
+                        db.add_chat_message(
+                            session_id=st.session_state.session_id,
+                            role='assistant',
+                            content=ai_first_message
+                        )
+
+                    except Exception as e:
+                        st.error(f"AI 初始化失敗：{str(e)}")
+                        # 即使失敗，也允許用戶手動開始對話
+                        st.session_state.chat_messages.append({
+                            'role': 'assistant',
+                            'content': "抱歉，自動分析暫時無法使用。請直接告訴我你想檢討什麼？"
+                        })
+
+            # 顯示對話歷史
+            for msg in st.session_state.chat_messages:
+                with st.chat_message(msg['role']):
+                    st.write(msg['content'])
+
+            # 使用者輸入
+            user_input = st.chat_input("分享你當時的想法...")
+
+            if user_input:
+                # 加入使用者訊息
                 st.session_state.chat_messages.append({
-                    'role': 'assistant',
-                    'content': ai_response
+                    'role': 'user',
+                    'content': user_input
                 })
 
                 db.add_chat_message(
                     session_id=st.session_state.session_id,
-                    role='assistant',
-                    content=ai_response
+                    role='user',
+                    content=user_input
                 )
 
-                # 顯示 AI 回應
-                with st.chat_message('assistant'):
-                    st.write(ai_response)
+                # 顯示使用者訊息
+                with st.chat_message('user'):
+                    st.write(user_input)
 
-            except Exception as e:
-                st.error(f"AI 回應失敗：{str(e)}")
+                # 取得 AI 回應
+                try:
+                    ai_response = ai_coach.continue_conversation(
+                        chat_history=st.session_state.chat_messages[:-1],
+                        user_message=user_input
+                    )
 
-        # 自動提取錯誤卡片功能
-        st.markdown("### 🃏 錯誤管理")
-        if st.button("✨ 自動偵測並建立錯誤卡片"):
-            if len(st.session_state.chat_messages) < 2:
-                st.warning("對話內容太少，無法進行分析。請先與 AI 教練多聊幾句。")
-            else:
-                with st.spinner("AI 正在分析對話中的交易失誤..."):
-                    # 組合對話內容
-                    full_conversation = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.chat_messages])
-                    
-                    # 呼叫 AI 偵測
-                    detected_mistakes = ai_coach.detect_mistakes(full_conversation)
-                    
-                    if detected_mistakes:
-                        count = 0
-                        for mistake in detected_mistakes:
-                            # 嘗試從交易數據中獲取 PnL (取總盈虧作為估計)
-                            pnl = trades_df['realized_pnl'].sum()
-                            
-                            db.add_mistake(
-                                symbol=selected_symbol,
-                                date=start_date,
-                                error_type=mistake.get('error_type', 'Unknown'),
-                                description=mistake.get('description', ''),
-                                pnl=pnl,
-                                ai_analysis=mistake.get('ai_analysis', '')
-                            )
-                            count += 1
+                    st.session_state.chat_messages.append({
+                        'role': 'assistant',
+                        'content': ai_response
+                    })
+
+                    db.add_chat_message(
+                        session_id=st.session_state.session_id,
+                        role='assistant',
+                        content=ai_response
+                    )
+
+                    # 顯示 AI 回應
+                    with st.chat_message('assistant'):
+                        st.write(ai_response)
+
+                except Exception as e:
+                    st.error(f"AI 回應失敗：{str(e)}")
+
+            # 自動提取錯誤卡片功能
+            st.markdown("### 🃏 錯誤管理")
+            if st.button("✨ 自動偵測並建立錯誤卡片"):
+                if len(st.session_state.chat_messages) < 2:
+                    st.warning("對話內容太少，無法進行分析。請先與 AI 教練多聊幾句。")
+                else:
+                    with st.spinner("AI 正在分析對話中的交易失誤..."):
+                        # 組合對話內容
+                        full_conversation = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.chat_messages])
                         
-                        st.success(f"✅ 已成功建立 {count} 張錯誤卡片！請前往「🃏 錯誤卡片」頁面查看。")
-                    else:
-                        st.info("👍 AI 在本次對話中沒有偵測到明顯的典型交易錯誤。繼續保持！")
+                        # 呼叫 AI 偵測
+                        detected_mistakes = ai_coach.detect_mistakes(full_conversation)
+                        
+                        if detected_mistakes:
+                            count = 0
+                            for mistake in detected_mistakes:
+                                # 嘗試從交易數據中獲取 PnL (取總盈虧作為估計)
+                                pnl = trades_df['realized_pnl'].sum()
+                                
+                                db.add_mistake(
+                                    symbol=selected_symbol,
+                                    date=start_date,
+                                    error_type=mistake.get('error_type', 'Unknown'),
+                                    description=mistake.get('description', ''),
+                                    pnl=pnl,
+                                    ai_analysis=mistake.get('ai_analysis', '')
+                                )
+                                count += 1
+                            
+                            st.success(f"✅ 已成功建立 {count} 張錯誤卡片！請前往「🃏 錯誤卡片」頁面查看。")
+                        else:
+                            st.info("👍 AI 在本次對話中沒有偵測到明顯的典型交易錯誤。繼續保持！")
 
-    # 6. 儲存日誌區
-    st.markdown("---")
-    st.subheader("📝 儲存交易日誌")
+        # 6. 儲存日誌區
+        st.markdown("---")
+        st.subheader("📝 儲存交易日誌")
 
-    with st.form("journal_form"):
-        col1, col2 = st.columns(2)
+        with st.form("journal_form"):
+            col1, col2 = st.columns(2)
 
-        with col1:
-            thesis = st.text_area(
-                "交易論點 (Thesis)",
-                placeholder="當時為什麼進場？技術面還是基本面？",
+            with col1:
+                thesis = st.text_area(
+                    "交易論點 (Thesis)",
+                    placeholder="當時為什麼進場？技術面還是基本面？",
+                    height=100
+                )
+
+            with col2:
+                mood = st.selectbox(
+                    "當時心情",
+                    ["😌 平靜", "😰 焦慮", "😤 激動", "😕 猶豫", "😎 自信"]
+                )
+
+            key_takeaway = st.text_area(
+                "關鍵教訓 (Key Takeaway)",
+                placeholder="從這次交易中學到了什麼？",
                 height=100
             )
 
-        with col2:
-            mood = st.selectbox(
-                "當時心情",
-                ["😌 平靜", "😰 焦慮", "😤 激動", "😕 猶豫", "😎 自信"]
-            )
+            submit_journal = st.form_submit_button("💾 儲存日誌", type="primary")
 
-        key_takeaway = st.text_area(
-            "關鍵教訓 (Key Takeaway)",
-            placeholder="從這次交易中學到了什麼？",
-            height=100
-        )
+            if submit_journal:
+                journal_id = db.add_journal_entry(
+                    trade_date=start_date,
+                    symbol=selected_symbol,
+                    thesis=thesis,
+                    mood=mood,
+                    key_takeaway=key_takeaway
+                )
 
-        submit_journal = st.form_submit_button("💾 儲存日誌", type="primary")
+                st.success(f"✅ 日誌已儲存 (ID: {journal_id})")
+                st.balloons()
 
-        if submit_journal:
-            journal_id = db.add_journal_entry(
-                trade_date=start_date,
-                symbol=selected_symbol,
-                thesis=thesis,
-                mood=mood,
-                key_takeaway=key_takeaway
-            )
-
-            st.success(f"✅ 日誌已儲存 (ID: {journal_id})")
-            st.balloons()

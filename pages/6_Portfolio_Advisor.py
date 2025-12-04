@@ -22,13 +22,19 @@ from database import TradingDatabase
 from utils.ai_coach import AICoach
 from utils.derivatives_support import InstrumentParser
 from utils.option_market_data import OptionMarketData
+from utils.styles import inject_custom_css, render_header_with_subtitle
+from config.theme import COLORS
 
 # 頁面配置
 st.set_page_config(
-    page_title="投資組合 AI 顧問",
+    page_title="Portfolio AI 顧問 | AI Trading Journal",
     page_icon="🧠",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
+
+# 注入自定義 CSS 樣式
+inject_custom_css()
 
 # 初始化
 @st.cache_resource
@@ -45,9 +51,10 @@ def init_ai():
 db = init_db()
 ai_coach = init_ai()
 
-st.title("🧠 投資組合 AI 顧問")
-st.markdown("基於你的**實際持倉**、**市場走勢**和**研究報告**，提供精準的風險管理與避險建議")
-st.markdown("---")
+render_header_with_subtitle(
+    title="🧠 Portfolio AI 顧問",
+    subtitle="基於實際持倉、市場走勢和研究報告，提供精準的風險管理與避險建議"
+)
 
 if ai_coach is None:
     st.error("⚠️ 需要設定 GEMINI_API_KEY")

@@ -2,36 +2,147 @@
 AI 教練整合模組
 
 此模組負責：
-1. 與 Google Gemini API 互動
+1. 與 AI API 互動（支援 DeepSeek 或 Google Gemini）
 2. 生成交易檢討對話
 3. 提供策略建議
 4. 生成績效評語
 """
 
 import os
-from typing import List, Dict, Any
-import google.generativeai as genai
+from typing import List, Dict, Any, Optional
+from abc import ABC, abstractmethod
+
+
+class AIProvider(ABC):
+    """AI 提供商抽象基類"""
+    
+    @abstractmethod
+    def generate_content(self, prompt: str) -> str:
+        """生成內容"""
+        pass
+    
+    @abstractmethod
+    def start_chat(self, history: List[Dict]) -> 'ChatSession':
+        """開始對話"""
+        pass
+
+
+class DeepSeekProvider(AIProvider):
+    """DeepSeek API 提供商"""
+    
+    def __init__(self, api_key: str):
+        from openai import OpenAI
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url="https://api.deepseek.com"
+        )
+        self.model = "deepseek-chat"
+    
+    def generate_content(self, prompt: str) -> str:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=4096
+        )
+        return response.choices[0].message.content
+    
+    def start_chat(self, history: List[Dict]) -> 'DeepSeekChatSession':
+        return DeepSeekChatSession(self.client, self.model, history)
+
+
+class DeepSeekChatSession:
+    """DeepSeek 聊天會話"""
+    
+    def __init__(self, client, model: str, history: List[Dict]):
+        self.client = client
+        self.model = model
+        self.messages = []
+        for msg in history:
+            role = "user" if msg.get("role") == "user" else "assistant"
+            content = msg.get("parts", [msg.get("content", "")])[0] if isinstance(msg.get("parts"), list) else msg.get("content", "")
+            self.messages.append({"role": role, "content": content})
+    
+    def send_message(self, message: str) -> 'DeepSeekResponse':
+        self.messages.append({"role": "user", "content": message})
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=self.messages,
+            temperature=0.7,
+            max_tokens=4096
+        )
+        assistant_message = response.choices[0].message.content
+        self.messages.append({"role": "assistant", "content": assistant_message})
+        return DeepSeekResponse(assistant_message)
+
+
+class DeepSeekResponse:
+    """DeepSeek 回應包裝器"""
+    def __init__(self, text: str):
+        self.text = text
+
+
+class GeminiProvider(AIProvider):
+    """Google Gemini API 提供商"""
+    
+    def __init__(self, api_key: str):
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        self.model = genai.GenerativeModel('gemini-2.0-flash')
+        self.genai = genai
+    
+    def generate_content(self, prompt: str) -> str:
+        response = self.model.generate_content(prompt)
+        return response.text
+    
+    def start_chat(self, history: List[Dict]) -> Any:
+        return self.model.start_chat(history=history)
 
 
 class AICoach:
-    """AI 交易教練"""
+    """AI 交易教練 - 支援多個 AI 提供商"""
 
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: str = None, provider: str = None):
         """
         初始化 AI 教練
 
         Args:
-            api_key: Google Gemini API Key（若為 None 則從環境變數讀取）
+            api_key: API Key（若為 None 則從環境變數讀取）
+            provider: 強制使用的提供商 ('deepseek' 或 'gemini')
         """
-        if api_key is None:
-            api_key = os.getenv('GEMINI_API_KEY')
-
-        if not api_key:
-            raise ValueError("請提供 GEMINI_API_KEY 環境變數或直接傳入 API Key")
-
-        genai.configure(api_key=api_key)
-        # 使用最新的 Gemini 3.0 Pro Preview 模型
-        self.model = genai.GenerativeModel('gemini-3-pro-preview')
+        self.provider: AIProvider = None
+        self.provider_name: str = ""
+        
+        # 嘗試初始化 DeepSeek（優先）
+        deepseek_key = api_key or os.getenv('DEEPSEEK_API_KEY')
+        if deepseek_key and (provider is None or provider == 'deepseek'):
+            try:
+                self.provider = DeepSeekProvider(deepseek_key)
+                self.provider_name = "DeepSeek"
+                return
+            except ImportError:
+                pass  # openai 套件未安裝，嘗試 Gemini
+            except Exception as e:
+                print(f"DeepSeek 初始化失敗: {e}")
+        
+        # 嘗試初始化 Gemini（備用）
+        gemini_key = api_key or os.getenv('GEMINI_API_KEY')
+        if gemini_key and (provider is None or provider == 'gemini'):
+            try:
+                self.provider = GeminiProvider(gemini_key)
+                self.provider_name = "Gemini"
+                return
+            except ImportError:
+                pass  # google-generativeai 套件未安裝
+            except Exception as e:
+                print(f"Gemini 初始化失敗: {e}")
+        
+        # 都失敗了
+        raise ValueError(
+            "請提供 DEEPSEEK_API_KEY 或 GEMINI_API_KEY 環境變數。\n"
+            "DeepSeek: https://platform.deepseek.com/\n"
+            "Gemini: https://makersuite.google.com/app/apikey"
+        )
 
     def start_review_session(self,
                              analysis_context: str,
@@ -78,11 +189,7 @@ class AICoach:
 請根據這些資訊，向交易者提出一個開放式問題，引導他們反思當時的決策和心理狀態。
 """
 
-        response = self.model.generate_content([
-            {"role": "user", "parts": [system_prompt + user_message]}
-        ])
-
-        return response.text
+        return self.provider.generate_content(system_prompt + user_message)
 
     def continue_conversation(self,
                               chat_history: List[Dict[str, str]],
@@ -115,7 +222,7 @@ class AICoach:
             "parts": [user_message]
         })
 
-        chat = self.model.start_chat(history=messages[:-1])
+        chat = self.provider.start_chat(messages[:-1])
         response = chat.send_message(user_message)
 
         return response.text
@@ -161,8 +268,7 @@ class AICoach:
 請用簡潔、具體的語言回答。
 """
 
-        response = self.model.generate_content(prompt)
-        return response.text
+        return self.provider.generate_content(prompt)
 
     def generate_performance_review(self, stats: Dict[str, Any], insights: str) -> str:
         """
@@ -197,8 +303,7 @@ class AICoach:
 請用直接、可執行的語言，不要空泛的鼓勵。
 """
 
-        response = self.model.generate_content(prompt)
-        return response.text
+        return self.provider.generate_content(prompt)
 
     def summarize_key_takeaway(self, conversation: str) -> str:
         """
@@ -218,8 +323,7 @@ class AICoach:
 請提供簡潔但深刻的總結，聚焦於交易者需要改進的核心行為或心理模式。
 """
 
-        response = self.model.generate_content(prompt)
-        return response.text
+        return self.provider.generate_content(prompt)
 
     def detect_mistakes(self, conversation: str) -> List[Dict[str, Any]]:
         """
@@ -260,8 +364,7 @@ class AICoach:
 **只回傳 JSON 字串，不要有其他文字或 Markdown 標記。**
 """
         try:
-            response = self.model.generate_content(prompt)
-            text = response.text.strip()
+            text = self.provider.generate_content(prompt).strip()
             # 清理 markdown 標記
             if text.startswith("```json"):
                 text = text[7:]
@@ -306,8 +409,7 @@ class AICoach:
         """
         
         try:
-            response = self.model.generate_content(prompt)
-            text = response.text.strip()
+            text = self.provider.generate_content(prompt).strip()
             # 移除可能的 markdown 標記
             if text.startswith("```json"):
                 text = text[7:-3]
@@ -369,8 +471,7 @@ class AICoach:
         """
         
         try:
-            response = self.model.generate_content(prompt)
-            text = response.text.strip()
+            text = self.provider.generate_content(prompt).strip()
             if text.startswith("```json"):
                 text = text[7:-3]
             elif text.startswith("```"):
@@ -391,7 +492,6 @@ class AICoach:
             AI 回應
         """
         try:
-            response = self.model.generate_content(prompt)
-            return response.text
+            return self.provider.generate_content(prompt)
         except Exception as e:
             return f"AI 分析發生錯誤: {str(e)}"
