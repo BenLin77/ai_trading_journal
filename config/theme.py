@@ -2,15 +2,16 @@
 專業金融軟體主題配置
 
 設計靈感: Bloomberg Terminal, TradingView, ThinkOrSwim, QuantConnect
-採用深色主題設計，降低眼睛疲勞，凸顯數據可讀性
+支援深色/淺色主題切換
 """
 
 from dataclasses import dataclass
+import streamlit as st
 
 
 @dataclass(frozen=True)
-class ColorPalette:
-    """核心色彩系統 - 基於 HSL 調和色盤"""
+class DarkColorPalette:
+    """深色主題色彩系統"""
     
     # 主要背景色系
     BG_PRIMARY: str = "#0E1117"      # 最深背景
@@ -54,6 +55,76 @@ class ColorPalette:
     ACCENT_PRIMARY: str = "#00D4AA"
     ACCENT_SECONDARY: str = "#58A6FF"
     ACCENT_HOVER: str = "#00F5C4"
+
+
+@dataclass(frozen=True)
+class LightColorPalette:
+    """淺色主題色彩系統"""
+    
+    # 主要背景色系
+    BG_PRIMARY: str = "#FFFFFF"      # 最淺背景
+    BG_SECONDARY: str = "#F6F8FA"    # 卡片/側邊欄背景
+    BG_TERTIARY: str = "#EAEEF2"     # hover 狀態背景
+    BG_ELEVATED: str = "#FFFFFF"     # 彈出框背景
+    
+    # 邊框色
+    BORDER_DEFAULT: str = "#D0D7DE"
+    BORDER_MUTED: str = "#E1E4E8"
+    BORDER_ACCENT: str = "#00A67E"
+    
+    # 文字色系
+    TEXT_PRIMARY: str = "#1F2328"    # 主要文字
+    TEXT_SECONDARY: str = "#57606A"  # 次要文字
+    TEXT_MUTED: str = "#8C959F"      # 輔助文字
+    TEXT_LINK: str = "#0969DA"       # 連結
+    
+    # 語意色彩 - 金融專用
+    PROFIT: str = "#00A67E"          # 獲利綠
+    PROFIT_BG: str = "rgba(0, 166, 126, 0.12)"
+    LOSS: str = "#CF222E"            # 虧損紅
+    LOSS_BG: str = "rgba(207, 34, 46, 0.12)"
+    
+    NEUTRAL: str = "#57606A"         # 中性灰
+    WARNING: str = "#BF8700"         # 警告黃
+    WARNING_BG: str = "rgba(191, 135, 0, 0.12)"
+    INFO: str = "#0969DA"            # 資訊藍
+    INFO_BG: str = "rgba(9, 105, 218, 0.12)"
+    
+    # 圖表專用色
+    CHART_BG: str = "#FFFFFF"
+    CHART_GRID: str = "#E1E4E8"
+    CHART_LINE_PRIMARY: str = "#00A67E"
+    CHART_LINE_SECONDARY: str = "#0969DA"
+    CHART_CANDLE_BULL: str = "#00A67E"
+    CHART_CANDLE_BEAR: str = "#CF222E"
+    CHART_VOLUME: str = "#AFB8C1"
+    
+    # 互動元素
+    ACCENT_PRIMARY: str = "#00A67E"
+    ACCENT_SECONDARY: str = "#0969DA"
+    ACCENT_HOVER: str = "#00C896"
+
+
+# 為了向後相容，保留 ColorPalette 別名
+ColorPalette = DarkColorPalette
+
+
+def get_current_theme() -> str:
+    """取得當前主題設定"""
+    return st.session_state.get('app_theme', 'dark')
+
+
+def set_theme(theme: str):
+    """設定主題"""
+    st.session_state['app_theme'] = theme
+
+
+def get_colors():
+    """根據當前主題取得色彩配置"""
+    theme = get_current_theme()
+    if theme == 'light':
+        return LightColorPalette()
+    return DarkColorPalette()
 
 
 @dataclass(frozen=True)

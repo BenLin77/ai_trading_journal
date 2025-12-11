@@ -114,7 +114,7 @@ uv run test_ibkr_flex.py
 
 ### 方法 1：透過 UI 手動同步
 
-1. 啟動系統：`uv run streamlit run Home.py`
+1. 啟動系統：`uv run streamlit run app.py`
 2. 在首頁點擊 **📥 執行同步** 按鈕
 3. 系統會自動：
    - 取得前一日交易記錄
@@ -213,5 +213,5 @@ uv run test_ibkr_flex.py
 
 - [`utils/ibkr_flex_query.py`](../utils/ibkr_flex_query.py): Flex Query API 客戶端
 - [`database.py`](../database.py): 資料庫操作（含 open_positions 表）
-- [`Home.py`](../Home.py): UI 同步按鈕
+- [`app.py`](../app.py): UI 同步按鈕
 - [`.env.example`](../.env.example): 環境變數範本

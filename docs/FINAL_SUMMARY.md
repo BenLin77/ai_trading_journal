@@ -140,7 +140,7 @@ ai_trading_journal/
 │   ├── logging_config.py         # Logging 配置
 │   └── validators.py             # 資料驗證
 ├── database.py                   # ✅ 已整合 datetime_utils
-├── Home.py
+├── app.py
 └── pytest.ini
 ```
 
@@ -150,7 +150,7 @@ ai_trading_journal/
 
 ### Phase 2: 整合新工具 (下週)
 
-#### 1. 在 Home.py 整合 data_loader
+#### 1. 在 app.py 整合 data_loader
 **優先級**: 🔴 High
 
 **現況**:
@@ -175,7 +175,7 @@ pnl_by_symbol = load_pnl_by_symbol()
 #### 2. 應用 constants.py
 **優先級**: 🟡 Medium
 
-**影響範圍**: `Home.py`, `utils/charts.py`, 所有 pages
+**影響範圍**: `app.py`, `utils/charts.py`, 所有 pages
 
 **範例**:
 ```python
@@ -245,7 +245,7 @@ logger.error(f"處理失敗: {e}")
 
 **Before**:
 ```python
-# Home.py - 分散的代碼，無快取
+# app.py - 分散的代碼，無快取
 db = TradingDatabase()  # 每次都建立新連接
 stats = db.get_trade_statistics()
 pnl_by_symbol = db.get_pnl_by_symbol()
@@ -261,7 +261,7 @@ df['datetime'] = pd.to_datetime(df['datetime'])
 
 **After** (使用新模組):
 ```python
-# Home.py - 簡潔、快取、錯誤處理
+# app.py - 簡潔、快取、錯誤處理
 from utils.data_loader import (
     load_all_trades, 
     load_trade_statistics,
@@ -297,7 +297,7 @@ df = trades_to_dataframe(trades)  # 自動處理日期
    ```
 
 ### 本週計畫
-1. ⬛ 在 `Home.py` 整合 data_loader (2 小時)
+1. ⬛ 在 `app.py` 整合 data_loader (2 小時)
 2. ⬛ 替換魔法數字為 constants (1 小時)  
 3. ⬛ 應用 datetime_utils 到所有頁面 (2 小時)
 4. ⬛ 添加基礎 logging (1 小時)
@@ -336,7 +336,7 @@ df = trades_to_dataframe(trades)  # 自動處理日期
 - [x] .gitignore 更新
 
 ### 待執行 ⬜
-- [ ] 在 Home.py 整合新模組
+- [ ] 在 app.py 整合新模組
 - [ ] 在所有頁面應用 datetime_utils
 - [ ] 替換所有魔法數字
 - [ ] 添加 logging 到主要檔案

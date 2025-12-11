@@ -74,8 +74,8 @@ class InstrumentParser:
             return result
 
         # 選擇權格式 3: IBKR 簡潔格式 (ONDS 20251114.0C8.0)
-        # 格式: SYMBOL YYYYMMDD.C/PStrike
-        ibkr_pattern = r'^([A-Z]+)\s+(\d{8})\.([CP])([\d.]+)$'
+        # 格式: SYMBOL YYYYMMDD.0C/PStrike (注意 .0C 或 .0P)
+        ibkr_pattern = r'^([A-Z]+)\s+(\d{8})\.0?([CP])([\d.]+)$'
         match = re.match(ibkr_pattern, symbol)
 
         if match:

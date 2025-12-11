@@ -155,8 +155,8 @@ docs/
 | 問題 | 狀態 | 檔案位置 |
 |------|------|---------|
 | 1️⃣ ONDS 查詢失敗 | ✅ 已修復 | `database.py:243-252` |
-| 2️⃣ 獲利曲線圖醜 | ✅ 已改善 | `Home.py:240-332` |
-| 3️⃣ 卡片無法點擊 | ✅ 已添加 | `Home.py:217-237` |
+| 2️⃣ 獲利曲線圖醜 | ✅ 已改善 | `app.py:240-332` |
+| 3️⃣ 卡片無法點擊 | ✅ 已添加 | `app.py:217-237` |
 | 4️⃣ 程式碼品質 | ✅ 已分析 | [CODE_REVIEW_REPORT.md](./CODE_REVIEW_REPORT.md) |
 | 5️⃣ 專案清理 | ✅ 已完成 | [CLEANUP_COMPLETE.md](./CLEANUP_COMPLETE.md) ⭐ |
 
@@ -186,7 +186,7 @@ docs/
    ```
 
 ### 本週計畫
-1. ⬜ 在 `Home.py` 整合 data_loader
+1. ⬜ 在 `app.py` 整合 data_loader
 2. ⬜ 替換所有魔法數字為 constants
 3. ⬜ 應用 datetime_utils 到所有頁面
 
@@ -304,8 +304,8 @@ docs/
 | 問題 | 狀態 | 檔案位置 |
 |------|------|---------|
 | 1️⃣ ONDS 查詢失敗 | ✅ 已修復 | `database.py:243-252` |
-| 2️⃣ 獲利曲線圖醜 | ✅ 已改善 | `Home.py:240-332` |
-| 3️⃣ 卡片無法點擊 | ✅ 已添加 | `Home.py:217-237` |
+| 2️⃣ 獲利曲線圖醜 | ✅ 已改善 | `app.py:240-332` |
+| 3️⃣ 卡片無法點擊 | ✅ 已添加 | `app.py:217-237` |
 | 4️⃣ 程式碼品質 | 📋 已分析 | [CODE_REVIEW_REPORT.md](./CODE_REVIEW_REPORT.md) |
 
 ---
@@ -335,7 +335,7 @@ uv add --dev pre-commit
 ## 💡 使用建議
 
 ### 給開發者
-1. **先測試修復**: 執行 `uv run streamlit run Home.py` 確認三個問題都已解決
+1. **先測試修復**: 執行 `uv run streamlit run app.py` 確認三個問題都已解決
 2. **閱讀總結**: 花 5-10 分鐘看 [IMPROVEMENT_SUMMARY.md](./IMPROVEMENT_SUMMARY.md)
 3. **規劃改善**: 根據 [QUICK_WINS.md](./QUICK_WINS.md) 制定本週計畫
 4. **逐步執行**: 遵循 Phase 1 → Phase 2 → Phase 3 → Phase 4

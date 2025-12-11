@@ -1,7 +1,13 @@
-# Environment variables
-.env
+# ==========================================
+# AI Trading Journal - .gitignore
+# ==========================================
 
-# Python
+# ========== Environment ==========
+.env
+.env.local
+.env.*.local
+
+# ========== Python ==========
 __pycache__/
 *.py[cod]
 *$py.class
@@ -11,56 +17,75 @@ __pycache__/
 env/
 venv/
 ENV/
+.eggs/
+*.egg-info/
+*.egg
 
-# Database
-# *.db (moved to Project specific)
+# uv
+uv.lock
+
+# ========== Node.js ==========
+node_modules/
+.pnpm-store/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Next.js
+.next/
+out/
+
+# ========== Database ==========
+*.db
 *.sqlite
 *.sqlite3
 
-# IDE
+# ========== IDE ==========
 .vscode/
 .idea/
 *.swp
 *.swo
-# *~ (moved to Temporary files)
+*.sublime-workspace
+*.sublime-project
+
+# ========== OS ==========
 .DS_Store
-
-# Project specific
-.env
-*.db
-*.csv
-*.log
-
-# Testing
-htmlcov/
-.coverage
-.pytest_cache/
-.tox/
-
-# Temporary files
-temp_*/
-*.tmp
-*~
-
-# OS
-# .DS_Store (moved to IDE, but also kept here as per instruction)
 Thumbs.db
 .directory
+*~
 
-# Logs
+# ========== Testing ==========
+htmlcov/
+.coverage
+.coverage.*
+.pytest_cache/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# ========== Logs ==========
 *.log
+logs/
 
-# Jupyter Notebook
-.ipynb_checkpoints
+# ========== Temporary files ==========
+temp_*/
+*.tmp
+tmp/
 
-# Distribution / packaging
+# ========== Jupyter Notebook ==========
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ========== Distribution / packaging ==========
 dist/
 build/
-*.egg-info/
+*.whl
 
-# Streamlit
+# ========== Streamlit ==========
 .streamlit/secrets.toml
 
+# ========== Project specific ==========
 # External dependencies
 external/
 lo2cin4bt/
@@ -73,3 +98,7 @@ records/
 reports/*.md
 !reports/README.md
 !reports/EXAMPLE_*.md
+
+# Generated CSV exports
+exports/
+*.csv

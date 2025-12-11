@@ -1,0 +1,40 @@
+@import "tailwindcss";
+
+/* 啟用 class-based dark mode for Tailwind v4 */
+@variant dark (&:where(.dark, .dark *));
+
+body {
+  font-family: var(--font-inter, system-ui, sans-serif);
+}
+
+/* 滾動條 - 淺色 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #94a3b8;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+/* 滾動條 - 深色 */
+.dark ::-webkit-scrollbar-track {
+  background: #1e293b;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: #475569;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
