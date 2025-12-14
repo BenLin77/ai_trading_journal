@@ -153,7 +153,7 @@ function PositionCard({ position, language }: PositionCardProps) {
             </span>
           )}
         </div>
-        {(position.unrealized_pnl !== undefined && position.unrealized_pnl !== 0) && (
+        {(position.unrealized_pnl !== undefined) && (
           <div className={cn('text-sm mt-1.5 font-medium', getPnLColor(position.unrealized_pnl || 0))}>
             {language === 'zh' ? '未實現: ' : 'Unrealized: '}
             {`${formatCurrency(position.unrealized_pnl, true)} (${formatPercent(position.unrealized_pnl_pct || 0, true)})`}

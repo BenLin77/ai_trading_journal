@@ -8,7 +8,10 @@ from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+import pytz
 import os
 import sys
 
@@ -16,11 +19,17 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database import TradingDatabase
-from utils.pnl_calculator import PnLCalculator
 from utils.ai_coach import AICoach
 from utils.ibkr_flex_query import IBKRFlexQuery
 from utils.option_strategies import OptionStrategyDetector, StrategyType, get_strategy_risk_level
 from utils.derivatives_support import InstrumentParser
+from utils.telegram_notifier import TelegramNotifier
+from utils.report_generator import ReportGenerator
+from utils.pnl_calculator import PnLCalculator
+from utils.logger import get_logger
+
+# 初始化 Logger
+logger = get_logger(__name__)
 
 from dotenv import load_dotenv
 # 載入父目錄的 .env 檔案
@@ -164,6 +173,10 @@ class SettingsResponse(BaseModel):
     theme: str
     ibkr_configured: bool
     ai_configured: bool
+    telegram_configured: bool
+    telegram_daily_time: str
+    telegram_bot_token: str  # 只回傳部分或遮蔽？前端需要顯示
+    telegram_chat_id: str
 
 
 class ConfigValidationRequest(BaseModel):
@@ -187,6 +200,10 @@ class SaveConfigRequest(BaseModel):
     deepseek_api_key: Optional[str] = None
     openai_api_key: Optional[str] = None
     ai_provider: Optional[str] = None  # 'gemini', 'deepseek', 'openai'
+    telegram_bot_token: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
+    telegram_daily_time: Optional[str] = None  # "HH:MM"
+    telegram_enabled: Optional[bool] = None
 
 
 # ========== Helper Functions ==========
@@ -447,14 +464,40 @@ async def get_portfolio():
     if not positions_raw:
         positions_raw = calculated_positions
     else:
-        # 合併邏輯：以 positions_raw (IBKR Snapshot) 為主，補全 calculated_positions 中有但 positions_raw 沒有的 symbol
-        snapshot_symbols = set(p.get('symbol', '') for p in positions_raw)
+        # 建立 calculated_positions 的 symbol -> data 映射
+        calc_by_symbol = {p.get('symbol', ''): p for p in calculated_positions}
         
+        # 合併邏輯：以 positions_raw (IBKR Snapshot) 為主
+        # 1. 如果 IBKR 缺少成本基礎或未實現盈虧，從 calculated_positions 補全
+        # 2. 如果 calculated_positions 有但 positions_raw 沒有的 symbol，加入
+        snapshot_symbols = set()
+        
+        for pos in positions_raw:
+            symbol = pos.get('symbol', '')
+            snapshot_symbols.add(symbol)
+            
+            # 檢查是否需要從 calculated_positions 補全數據
+            calc_pos = calc_by_symbol.get(symbol)
+            if calc_pos:
+                # 如果 IBKR 沒有返回成本基礎，使用計算的
+                if not pos.get('average_cost') or pos.get('average_cost', 0) == 0:
+                    pos['average_cost'] = calc_pos.get('average_cost', 0)
+                
+                # 如果 IBKR 沒有返回未實現盈虧，使用計算的
+                if not pos.get('unrealized_pnl') or pos.get('unrealized_pnl', 0) == 0:
+                    # 重新計算未實現盈虧
+                    mark_price = pos.get('mark_price', 0) or calc_pos.get('mark_price', 0)
+                    avg_cost = pos.get('average_cost', 0) or calc_pos.get('average_cost', 0)
+                    quantity = pos.get('position', 0)
+                    
+                    if mark_price > 0 and avg_cost > 0 and quantity != 0:
+                        pos['unrealized_pnl'] = (mark_price - avg_cost) * quantity
+                        pos['mark_price'] = mark_price
+        
+        # 加入 calculated_positions 中有但 snapshot 沒有的 symbol
         for calc_pos in calculated_positions:
             symbol = calc_pos.get('symbol', '')
-            # 如果 Snapshot 裡沒有這個 symbol，且計算出的持倉不為 0，則加入
             if symbol and symbol not in snapshot_symbols and calc_pos.get('position', 0) != 0:
-                # 標記為來自計算
                 calc_pos['source'] = 'calculated'
                 positions_raw.append(calc_pos)
     
@@ -863,16 +906,165 @@ async def analyze_portfolio():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# 初始化 AI Coach (延遲初始化，避免啟動失敗)
+ai_coach = None
+try:
+    ai_coach = _init_ai_coach()
+except Exception as e:
+    logger.warning(f"AI Coach 初始化警告 (非致命): {e}")
+
+# Scheduler 全域變數 (延遲初始化)
+scheduler = None
+
+async def send_daily_report_job():
+    """排程任務：發送每日戰情報告"""
+    try:
+        # 重新從資料庫獲取設定（因為這是排程任務，db session 應該要是新的或 thread-safe）
+        # 這裡假設 db 是全域變數且 thread-safe (TradingDatabase 使用 sqlite3，預設 check_same_thread=False)
+        
+        enabled = db.get_setting('telegram_enabled')
+        if enabled != 'true':
+            return
+            
+        token = db.get_setting('telegram_bot_token')
+        chat_id = db.get_setting('telegram_chat_id')
+        
+        if not token or not chat_id:
+            logger.info("Telegram 未配置，跳過報告發送")
+            return
+
+        # 0. 同步 IBKR 數據 (確保報告最新)
+        logger.info("正在同步 IBKR 數據...")
+        try:
+            flex_token = db.get_setting('ibkr_flex_token')
+            history_id = db.get_setting('ibkr_history_query_id')
+            positions_id = db.get_setting('ibkr_positions_query_id')
+            
+            if flex_token:
+                flex = IBKRFlexQuery(
+                    token=flex_token,
+                    history_query_id=history_id,
+                    positions_query_id=positions_id
+                )
+                # 執行同步
+                sync_result = flex.sync_to_database(db)
+                logger.info(f"IBKR 同步完成: {sync_result}")
+            else:
+                logger.warning("IBKR Token 未設定，跳過同步")
+                
+        except Exception as e:
+            logger.error(f"IBKR 同步失敗 (繼續生成報告): {e}")
+
+        logger.info(f"開始生成每日報告... (Chat ID: {chat_id})")
+        
+        # 確保 AI Coach 已初始化
+        global ai_coach
+        if ai_coach is None:
+            ai_coach = _init_ai_coach()
+            
+        if ai_coach is None:
+            logger.error("AI Coach 未配置，無法生成報告")
+            return
+            
+        # 重新實例化 ReportGenerator 以確保使用最新的 db 狀態
+        generator = ReportGenerator(db, ai_coach)
+        report_md = await generator.generate_daily_report()
+        
+        notifier = TelegramNotifier(token)
+        success = notifier.send_message(chat_id, report_md)
+        
+        if success:
+            logger.info("每日報告發送成功")
+        else:
+            logger.error("每日報告發送失敗")
+            
+    except Exception as e:
+        logger.error(f"每日報告任務執行失敗: {e}")
+
+def update_scheduler_job():
+    """根據設定更新排程任務"""
+    global scheduler
+    if scheduler is None:
+        logger.warning("Scheduler 尚未初始化，跳過更新")
+        return
+
+    try:
+        from apscheduler.triggers.cron import CronTrigger
+        import pytz
+
+        # 清除舊任務
+        scheduler.remove_all_jobs()
+        
+        enabled = db.get_setting('telegram_enabled')
+        daily_time = db.get_setting('telegram_daily_time')  # "HH:MM"
+        
+        if enabled == 'true' and daily_time:
+            try:
+                hour, minute = map(int, daily_time.split(':'))
+                # 設定為台灣時間 (Asia/Taipei)
+                tz = pytz.timezone('Asia/Taipei')
+                
+                scheduler.add_job(
+                    send_daily_report_job,
+                    CronTrigger(hour=hour, minute=minute, timezone=tz),
+                    id='daily_report'
+                )
+                logger.info(f"已排程每日報告: {daily_time} (Asia/Taipei)")
+            except ValueError:
+                logger.error(f"時間格式錯誤: {daily_time}")
+    except Exception as e:
+        logger.error(f"更新排程失敗: {e}")
+
+@app.on_event("startup")
+async def startup_event():
+    global scheduler
+    try:
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+        scheduler = AsyncIOScheduler()
+        scheduler.start()
+        logger.info("Scheduler 已啟動")
+        update_scheduler_job()
+    except Exception as e:
+        logger.error(f"Scheduler 初始化失敗: {e}")
+
+# ========== API Endpoints ==========
+
+@app.post("/api/telegram/test")
+async def test_telegram(request: dict):
+    """測試 Telegram 發送"""
+    token = request.get('token')
+    chat_id = request.get('chat_id')
+    
+    if not token or not chat_id:
+        return {"success": False, "message": "請提供 Token 和 Chat ID"}
+        
+    try:
+        notifier = TelegramNotifier(token)
+        message = "🚀 *AI Trading Journal* \n這是一條測試訊息。\n\nTelegram 通知功能設定成功！"
+        success = notifier.send_message(chat_id, message)
+        
+        if success:
+            return {"success": True, "message": "發送成功"}
+        else:
+            return {"success": False, "message": "發送失敗，請檢查 Token 或 Chat ID"}
+    except Exception as e:
+        return {"success": False, "message": f"發生錯誤: {str(e)}"}
+
+
 # ========== 設定 ==========
 
 @app.get("/api/settings", response_model=SettingsResponse)
 async def get_settings():
     """取得系統設定"""
     return SettingsResponse(
-        language="zh",
-        theme="dark",
-        ibkr_configured=bool(os.getenv("IBKR_FLEX_TOKEN")),
-        ai_configured=ai_coach is not None
+        language=db.get_setting('language', 'zh'),
+        theme=db.get_setting('theme', 'system'),
+        ibkr_configured=bool(db.get_setting('ibkr_flex_token')),
+        ai_configured=bool(db.get_setting('gemini_api_key') or db.get_setting('deepseek_api_key') or db.get_setting('openai_api_key')),
+        telegram_configured=bool(db.get_setting('telegram_bot_token') and db.get_setting('telegram_chat_id')),
+        telegram_daily_time=db.get_setting('telegram_daily_time', '08:00'),
+        telegram_bot_token=db.get_setting('telegram_bot_token', ''),
+        telegram_chat_id=db.get_setting('telegram_chat_id', '')
     )
 
 
@@ -901,6 +1093,12 @@ async def get_config_status():
     openai_key = _get_config("OPENAI_API_KEY", "")
     ai_provider = _get_config("AI_PROVIDER", "gemini")
     
+    # Telegram Config
+    telegram_token = _get_config("TELEGRAM_BOT_TOKEN", "")
+    telegram_chat_id = _get_config("TELEGRAM_CHAT_ID", "")
+    telegram_daily_time = _get_config("TELEGRAM_DAILY_TIME", "08:00")
+    telegram_enabled = _get_config("TELEGRAM_ENABLED", "false") == "true"
+    
     return {
         "ibkr": {
             "configured": bool(ibkr_token and ibkr_history_id),
@@ -915,6 +1113,13 @@ async def get_config_status():
             "gemini_set": bool(gemini_key),
             "deepseek_set": bool(deepseek_key),
             "openai_set": bool(openai_key),
+        },
+        "telegram": {
+            "configured": bool(telegram_token and telegram_chat_id),
+            "token_set": bool(telegram_token),
+            "chat_id": telegram_chat_id,
+            "daily_time": telegram_daily_time,
+            "enabled": telegram_enabled
         }
     }
 
@@ -1147,6 +1352,19 @@ async def save_config(request: SaveConfigRequest):
             db.set_setting('OPENAI_API_KEY', request.openai_api_key)
         if request.ai_provider:
             db.set_setting('AI_PROVIDER', request.ai_provider)
+            
+        # Telegram Config
+        if request.telegram_bot_token:
+            db.set_setting('TELEGRAM_BOT_TOKEN', request.telegram_bot_token)
+        if request.telegram_chat_id:
+            db.set_setting('TELEGRAM_CHAT_ID', request.telegram_chat_id)
+        if request.telegram_daily_time:
+            db.set_setting('TELEGRAM_DAILY_TIME', request.telegram_daily_time)
+        if request.telegram_enabled is not None:
+            db.set_setting('TELEGRAM_ENABLED', 'true' if request.telegram_enabled else 'false')
+            
+        # 更新排程
+        update_scheduler_job()
         
         return {"success": True, "message": "設定已儲存，即時生效！"}
     except Exception as e:

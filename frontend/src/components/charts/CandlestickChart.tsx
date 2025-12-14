@@ -119,8 +119,9 @@ export function CandlestickChart({ symbol, ohlcData, trades, height = 500 }: Can
                 position: isBuy ? 'belowBar' : 'aboveBar',
                 color: isBuy ? '#10b981' : '#ef4444',
                 shape: isBuy ? 'arrowUp' : 'arrowDown',
-                text: `${isBuy ? '買' : '賣'} ${trade.is_option ? '選' : ''} ${Math.abs(trade.quantity)}@$${trade.price.toFixed(2)}`,
-                size: 2,
+                // 簡化：不顯示文字，只顯示箭頭
+                text: '',
+                size: 1,
             });
         });
 
