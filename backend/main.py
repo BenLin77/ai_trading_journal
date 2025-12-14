@@ -19,7 +19,7 @@ from database import TradingDatabase
 from utils.pnl_calculator import PnLCalculator
 from utils.ai_coach import AICoach
 from utils.ibkr_flex_query import IBKRFlexQuery
-from utils.option_strategy_detector import OptionStrategyDetector
+from utils.option_strategies import OptionStrategyDetector, StrategyType, get_strategy_risk_level
 from utils.derivatives_support import InstrumentParser
 
 from dotenv import load_dotenv
@@ -45,11 +45,30 @@ app.add_middleware(
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 db = TradingDatabase(os.path.join(parent_dir, 'trading_journal.db'))
 
-# AI 教練實例
-try:
-    ai_coach = AICoach()
-except Exception:
-    ai_coach = None
+# AI 教練實例（延遲初始化，從資料庫讀取設定）
+ai_coach = None
+
+def get_ai_coach():
+    """取得 AI 教練實例（從資料庫讀取 API Key）"""
+    global ai_coach
+    
+    # 從資料庫讀取設定
+    gemini_key = db.get_setting('GEMINI_API_KEY') or os.getenv('GEMINI_API_KEY')
+    deepseek_key = db.get_setting('DEEPSEEK_API_KEY') or os.getenv('DEEPSEEK_API_KEY')
+    ai_provider = db.get_setting('AI_PROVIDER') or os.getenv('AI_PROVIDER', 'gemini')
+    
+    if not gemini_key and not deepseek_key:
+        return None
+    
+    try:
+        if ai_provider == 'deepseek' and deepseek_key:
+            ai_coach = AICoach(api_key=deepseek_key, provider='deepseek')
+        elif gemini_key:
+            ai_coach = AICoach(api_key=gemini_key, provider='gemini')
+        return ai_coach
+    except Exception as e:
+        print(f"AI Coach 初始化失敗: {e}")
+        return None
 
 
 # ========== Pydantic Models ==========
@@ -147,6 +166,110 @@ class SettingsResponse(BaseModel):
     ai_configured: bool
 
 
+class ConfigValidationRequest(BaseModel):
+    config_type: str  # 'ibkr', 'gemini', 'deepseek', 'openai'
+    token: Optional[str] = None
+    query_id: Optional[str] = None
+    positions_query_id: Optional[str] = None
+
+
+class ConfigValidationResponse(BaseModel):
+    success: bool
+    message: str
+    details: Optional[Dict[str, Any]] = None
+
+
+class SaveConfigRequest(BaseModel):
+    ibkr_flex_token: Optional[str] = None
+    ibkr_history_query_id: Optional[str] = None
+    ibkr_positions_query_id: Optional[str] = None
+    gemini_api_key: Optional[str] = None
+    deepseek_api_key: Optional[str] = None
+    openai_api_key: Optional[str] = None
+    ai_provider: Optional[str] = None  # 'gemini', 'deepseek', 'openai'
+
+
+# ========== Helper Functions ==========
+
+def _calculate_positions_from_trades() -> List[Dict]:
+    """從交易記錄計算當前持倉"""
+    trades = db.get_trades()
+    if not trades:
+        return []
+    
+    parser = InstrumentParser()
+    positions_by_symbol = {}
+    
+    for t in trades:
+        symbol = t['symbol']
+        action = t['action'].upper()
+        quantity = t['quantity']
+        price = t['price']
+
+        # 相容處理：歷史資料可能存在兩種格式
+        # 1) BUY 正數、SELL 負數
+        # 2) BUY 正數、SELL 正數（需要依 action 判斷方向）
+        if action in ['SELL', 'SLD'] and quantity > 0:
+            qty_change = -quantity
+        else:
+            qty_change = quantity
+        
+        if symbol not in positions_by_symbol:
+            positions_by_symbol[symbol] = {
+                'symbol': symbol,
+                'position': 0,
+                'total_cost': 0,
+                'buy_qty': 0,
+                'asset_category': 'OPT' if t.get('instrument_type') == 'option' else 'STK',
+                'strike': t.get('strike'),
+                'expiry': t.get('expiry'),
+                'put_call': 'C' if t.get('option_type') == 'Call' else ('P' if t.get('option_type') == 'Put' else None),
+            }
+        
+        positions_by_symbol[symbol]['position'] += qty_change
+        
+        # 計算平均成本（只計算買入）
+        if qty_change > 0:
+            positions_by_symbol[symbol]['total_cost'] += qty_change * price
+            positions_by_symbol[symbol]['buy_qty'] += qty_change
+    
+    # 轉換為持倉列表（只保留有持倉的）
+    result = []
+    for symbol, pos in positions_by_symbol.items():
+        if pos['position'] != 0:  # 有持倉
+            avg_cost = pos['total_cost'] / pos['buy_qty'] if pos['buy_qty'] > 0 else 0
+            
+            # 嘗試取得即時價格
+            mark_price = 0
+            unrealized_pnl = 0
+            parsed = parser.parse_symbol(symbol)
+            
+            if pos['asset_category'] == 'STK':
+                try:
+                    import yfinance as yf
+                    ticker = yf.Ticker(parsed['underlying'])
+                    hist = ticker.history(period="1d")
+                    if len(hist) > 0:
+                        mark_price = float(hist['Close'].iloc[-1])
+                        unrealized_pnl = (mark_price - avg_cost) * pos['position']
+                except Exception:
+                    pass
+            
+            result.append({
+                'symbol': symbol,
+                'position': pos['position'],
+                'mark_price': mark_price,
+                'average_cost': avg_cost,
+                'unrealized_pnl': unrealized_pnl,
+                'asset_category': pos['asset_category'],
+                'strike': pos.get('strike'),
+                'expiry': pos.get('expiry'),
+                'put_call': pos.get('put_call'),
+            })
+    
+    return result
+
+
 # ========== API Endpoints ==========
 
 @app.get("/")
@@ -210,31 +333,91 @@ async def get_pnl_by_symbol():
 # ========== 統計相關 ==========
 
 @app.get("/api/statistics", response_model=StatisticsResponse)
-async def get_statistics():
-    """取得交易統計"""
-    stats = db.get_trade_statistics()
-    # 確保所有欄位都有預設值
+async def get_statistics(
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None
+):
+    """取得交易統計（支援日期篩選）"""
+    trades = db.get_trades()
+    
+    # 日期篩選
+    if start_date or end_date:
+        filtered_trades = []
+        for t in trades:
+            try:
+                trade_date_str = t.get('datetime', '')
+                if len(trade_date_str) == 8:  # YYYYMMDD format
+                    trade_date = datetime.strptime(trade_date_str, '%Y%m%d').date()
+                else:
+                    trade_date = datetime.fromisoformat(trade_date_str).date()
+                
+                if start_date and trade_date < start_date:
+                    continue
+                if end_date and trade_date > end_date:
+                    continue
+                filtered_trades.append(t)
+            except Exception:
+                continue
+        trades = filtered_trades
+    
+    # 計算統計
+    if not trades:
+        return StatisticsResponse(
+            total_trades=0, total_pnl=0, win_rate=0,
+            avg_win=0, avg_loss=0, profit_factor=0,
+            best_trade=0, worst_trade=0
+        )
+    
+    wins = [t['realized_pnl'] for t in trades if t.get('realized_pnl', 0) > 0]
+    losses = [t['realized_pnl'] for t in trades if t.get('realized_pnl', 0) < 0]
+    total_pnl = sum(t.get('realized_pnl', 0) for t in trades)
+    
     return StatisticsResponse(
-        total_trades=stats.get('total_trades', 0),
-        total_pnl=stats.get('total_pnl', 0),
-        win_rate=stats.get('win_rate', 0),
-        avg_win=stats.get('avg_win', 0),
-        avg_loss=stats.get('avg_loss', 0),
-        profit_factor=stats.get('profit_factor', 0),
-        best_trade=stats.get('best_trade', 0),
-        worst_trade=stats.get('worst_trade', 0),
+        total_trades=len(trades),
+        total_pnl=total_pnl,
+        win_rate=(len(wins) / len(trades) * 100) if trades else 0,
+        avg_win=(sum(wins) / len(wins)) if wins else 0,
+        avg_loss=(sum(losses) / len(losses)) if losses else 0,
+        profit_factor=(sum(wins) / abs(sum(losses))) if losses and sum(losses) != 0 else 0,
+        best_trade=max(wins) if wins else 0,
+        worst_trade=min(losses) if losses else 0,
     )
 
 
 @app.get("/api/equity-curve")
-async def get_equity_curve():
-    """取得資金曲線數據"""
+async def get_equity_curve(
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None
+):
+    """取得資金曲線數據（支援日期篩選）"""
     trades = db.get_trades()
     if not trades:
         return {"data": []}
     
-    # 按時間排序並計算累計盈虧
+    # 按時間排序
     sorted_trades = sorted(trades, key=lambda x: x['datetime'])
+    
+    # 日期篩選
+    if start_date or end_date:
+        filtered_trades = []
+        for t in sorted_trades:
+            try:
+                trade_date_str = t.get('datetime', '')
+                if len(trade_date_str) == 8:
+                    trade_date = datetime.strptime(trade_date_str, '%Y%m%d').date()
+                else:
+                    trade_date = datetime.fromisoformat(trade_date_str).date()
+                
+                if start_date and trade_date < start_date:
+                    continue
+                if end_date and trade_date > end_date:
+                    continue
+                filtered_trades.append(t)
+            except Exception:
+                continue
+        sorted_trades = filtered_trades
+    
+    # 計算累計盈虧
     cumulative = 0
     curve_data = []
     
@@ -253,31 +436,18 @@ async def get_equity_curve():
 
 @app.get("/api/portfolio", response_model=PortfolioOverviewResponse)
 async def get_portfolio():
-    """取得持倉總覽（基於 IBKR 持倉快照或交易記錄）"""
+    """取得持倉總覽（基於 IBKR 持倉快照或交易記錄計算）"""
     
     # 先嘗試從資料庫取得最新持倉快照
     positions_raw = db.get_latest_positions()
     
-    # 如果沒有持倉快照，使用 IBKR 實際數據（臨時方案）
+    # 如果沒有持倉快照，從交易記錄計算持倉
     if not positions_raw:
-        # 2024-12-11 IBKR 實際持倉截圖
-        positions_raw = [
-            {'symbol': 'SMCI', 'position': 410, 'mark_price': 33.19, 'average_cost': 41.38, 
-             'unrealized_pnl': -3357.11, 'asset_category': 'STK'},
-            {'symbol': 'SMR', 'position': 780, 'mark_price': 19.68, 'average_cost': 19.27, 
-             'unrealized_pnl': 320.99, 'asset_category': 'STK'},
-            {'symbol': 'NVTS', 'position': 80, 'mark_price': 8.83, 'average_cost': 8.00, 
-             'unrealized_pnl': 66.20, 'asset_category': 'STK'},
-            {'symbol': 'ONDS', 'position': 2550, 'mark_price': 8.54, 'average_cost': 7.18, 
-             'unrealized_pnl': 3491.65, 'asset_category': 'STK'},
-            {'symbol': 'SMR 250116C22', 'position': -2, 'mark_price': 1.47, 'average_cost': 1.26, 
-             'unrealized_pnl': -37.66, 'asset_category': 'OPT', 'put_call': 'C', 'strike': 22.0, 
-             'expiry': '2026-01-16'},
-        ]
+        positions_raw = _calculate_positions_from_trades()
     
     # 使用 OptionStrategyDetector 分析策略
     import pandas as pd
-    positions_df = pd.DataFrame(positions_raw)
+    positions_df = pd.DataFrame(positions_raw) if positions_raw else pd.DataFrame()
     
     # 按 underlying 分組持倉
     parser = InstrumentParser()
@@ -299,7 +469,10 @@ async def get_portfolio():
                 'realized_pnl': 0
             }
         
-        asset_cat = pos.get('asset_category', 'STK')
+        asset_cat = pos.get('asset_category')
+        if not asset_cat:
+            instrument_type = str(pos.get('instrument_type', 'stock') or 'stock').lower()
+            asset_cat = 'OPT' if instrument_type == 'option' else 'STK'
         quantity = pos.get('position', 0)
         mark_price = pos.get('mark_price', 0)
         avg_cost = pos.get('average_cost', 0)
@@ -312,16 +485,26 @@ async def get_portfolio():
             grouped_positions[underlying]['stock_value'] = quantity * mark_price
             grouped_positions[underlying]['stock_unrealized'] = unrealized
         elif asset_cat == 'OPT':
+            put_call = pos.get('put_call')
+            if not put_call:
+                opt_type = str(pos.get('option_type', '') or '').lower()
+                if opt_type in ['call', 'c']:
+                    put_call = 'C'
+                elif opt_type in ['put', 'p']:
+                    put_call = 'P'
+
+            multiplier = int(pos.get('multiplier', 100) or 100)
             grouped_positions[underlying]['options'].append({
                 'symbol': symbol,
-                'option_type': 'call' if pos.get('put_call') == 'C' else 'put',
+                'option_type': 'call' if put_call == 'C' else 'put',
                 'strike': float(pos.get('strike', 0)) if pos.get('strike') else 0,
                 'expiry': pos.get('expiry', ''),
                 'quantity': int(abs(quantity)),
                 'action': 'buy' if quantity > 0 else 'sell',
                 'net_quantity': quantity,
                 'mark_price': mark_price,
-                'unrealized_pnl': unrealized
+                'unrealized_pnl': unrealized,
+                'multiplier': multiplier,
             })
     
     # 取得已實現盈虧
@@ -333,67 +516,53 @@ async def get_portfolio():
     total_unrealized = 0
     
     for underlying, data in grouped_positions.items():
-        # 計算策略類型
-        strategy = None
-        strategy_description = None
+        # 使用新的策略識別模組
+        from utils.option_strategies import OptionLeg as StrategyOptionLeg, StockPosition as StrategyStockPosition
         
-        has_stock = data['stock_quantity'] > 0
-        options = data['options']
+        # 轉換為策略識別模組的格式
+        strategy_options = []
+        for o in data['options']:
+            qty = o.get('net_quantity', o.get('quantity', 0))
+            if o['action'] == 'sell':
+                qty = -abs(qty)
+            else:
+                qty = abs(qty)
+            strategy_options.append(StrategyOptionLeg(
+                symbol=o['symbol'],
+                option_type=o['option_type'],
+                strike=o.get('strike', 0),
+                expiry=o.get('expiry', ''),
+                quantity=qty,
+                premium=o.get('mark_price', 0)
+            ))
         
-        # 分類選擇權
-        long_calls = [o for o in options if o['option_type'] == 'call' and o['action'] == 'buy']
-        short_calls = [o for o in options if o['option_type'] == 'call' and o['action'] == 'sell']
-        long_puts = [o for o in options if o['option_type'] == 'put' and o['action'] == 'buy']
-        short_puts = [o for o in options if o['option_type'] == 'put' and o['action'] == 'sell']
+        strategy_stock = None
+        if data['stock_quantity'] != 0:
+            strategy_stock = StrategyStockPosition(
+                symbol=underlying,
+                quantity=int(data['stock_quantity']),
+                avg_cost=data['stock_cost'],
+                current_price=data['stock_price']
+            )
         
         # 識別策略
-        if has_stock:
-            if short_calls and long_puts:
-                strategy = "領口策略"
-                strategy_description = "持有正股 + 買 Put + 賣 Call，鎖定風險區間"
-            elif short_calls and not long_puts:
-                strategy = "備兌看漲"
-                strategy_description = "持有正股，賣出看漲期權收取權利金"
-            elif long_puts and not short_calls:
-                strategy = "保護性賣權"
-                strategy_description = "持有正股，買入賣權保護下跌風險"
-            elif short_calls and short_puts:
-                strategy = "備兌勒式"
-                strategy_description = "持有正股，賣出看漲+賣權收取權利金"
-            else:
-                strategy = "純股票持倉"
-                strategy_description = "持有正股，無選擇權保護"
-        elif options:
-            if long_puts and short_puts and not long_calls and not short_calls:
-                if any(o['strike'] > p['strike'] for o in long_puts for p in short_puts):
-                    strategy = "熊市看跌價差"
-                    strategy_description = "買高履約價 Put + 賣低履約價 Put，看跌但限制風險"
-                else:
-                    strategy = "牛市看跌價差"
-                    strategy_description = "賣高履約價 Put + 買低履約價 Put，看漲收取權利金"
-            elif long_calls and short_calls and not long_puts and not short_puts:
-                strategy = "看漲價差"
-                strategy_description = "買低履約價 Call + 賣高履約價 Call"
-            elif long_calls and long_puts:
-                strategy = "跨式/勒式"
-                strategy_description = "買入 Call + Put，預期大幅波動"
-            elif short_calls and short_puts:
-                strategy = "賣出跨式/勒式"
-                strategy_description = "賣出 Call + Put，預期小幅波動"
-            elif long_puts and not long_calls and not short_calls and not short_puts:
-                strategy = "純看跌"
-                strategy_description = "買入賣權，看跌或避險"
-            elif long_calls and not long_puts and not short_calls and not short_puts:
-                strategy = "純看漲"
-                strategy_description = "買入買權，看漲"
-            else:
-                strategy = "選擇權組合"
-                strategy_description = "自訂選擇權策略"
+        strategy_result = OptionStrategyDetector.detect_strategy(
+            strategy_options, strategy_stock, data['stock_price']
+        )
+        
+        strategy = strategy_result.strategy_name
+        strategy_description = strategy_result.description
+        risk_level = get_strategy_risk_level(strategy_result.strategy_type)
+        
+        options = data['options']
         
         # 計算市值和未實現盈虧
         stock_value = data['stock_value']
         stock_unrealized = data['stock_unrealized']
-        options_value = sum(o.get('mark_price', 0) * o.get('net_quantity', 0) * 100 for o in options)
+        options_value = sum(
+            o.get('mark_price', 0) * o.get('net_quantity', 0) * float(o.get('multiplier', 100) or 100)
+            for o in options
+        )
         options_unrealized = sum(o.get('unrealized_pnl', 0) for o in options)
         
         total_market_value += stock_value + options_value
@@ -430,7 +599,7 @@ async def get_portfolio():
             opt_qty = o.get('net_quantity', o.get('quantity', 0))
             if o['action'] == 'sell':
                 opt_qty = -abs(opt_qty)
-            multiplier = 100  # 標準選擇權 multiplier
+            multiplier = float(o.get('multiplier', 100) or 100)
             
             # 簡化的 Greek 估算（實際應從選擇權定價模型計算）
             # Delta: Call ≈ 0.5, Put ≈ -0.5（ATM）
@@ -485,14 +654,11 @@ async def get_portfolio():
             theta=round(total_theta, 2)
         ))
     
-    # 取得現金餘額
+    # 取得現金餘額（只讀 DB 快照；避免每次都打 IBKR）
     cash_balance = 0
-    try:
-        flex = IBKRFlexQuery()
-        cash_data = flex.get_cash_balance()
-        cash_balance = cash_data.get('total_cash', 0)
-    except Exception:
-        pass
+    cash_snapshot = db.get_latest_cash_snapshot()
+    if cash_snapshot:
+        cash_balance = cash_snapshot.get('total_cash', 0) or 0
     
     return PortfolioOverviewResponse(
         positions=positions,
@@ -509,8 +675,24 @@ async def get_portfolio():
 async def sync_ibkr():
     """同步 IBKR 數據"""
     try:
-        flex = IBKRFlexQuery()
+        flex = IBKRFlexQuery(
+            token=_get_config('IBKR_FLEX_TOKEN', ''),
+            history_query_id=_get_config('IBKR_HISTORY_QUERY_ID', ''),
+            positions_query_id=_get_config('IBKR_POSITIONS_QUERY_ID', ''),
+        )
         result = flex.sync_to_database(db)
+
+        # 同步現金快照（寫入 DB；portfolio 只讀 DB）
+        try:
+            cash_data = flex.get_cash_balance(query_id=_get_config('IBKR_HISTORY_QUERY_ID', ''))
+            db.upsert_cash_snapshot(
+                total_cash=float(cash_data.get('total_cash', 0) or 0),
+                total_settled_cash=float(cash_data.get('total_settled_cash', 0) or 0),
+                currency='USD',
+                snapshot_date=datetime.now().strftime('%Y-%m-%d'),
+            )
+        except Exception:
+            pass
         
         # 重算盈虧
         pnl_calc = PnLCalculator(db)
@@ -518,8 +700,8 @@ async def sync_ibkr():
         
         return SyncResponse(
             success=True,
-            trades_synced=result.get('trades_synced', 0),
-            positions_synced=result.get('positions_synced', 0),
+            trades_synced=result.get('trades', result.get('trades_synced', 0)),
+            positions_synced=result.get('positions', result.get('positions_synced', 0)),
             message="Sync completed successfully"
         )
     except Exception as e:
@@ -529,18 +711,16 @@ async def sync_ibkr():
 @app.get("/api/ibkr/cash", response_model=CashBalanceResponse)
 async def get_cash_balance():
     """取得現金餘額"""
-    try:
-        flex = IBKRFlexQuery()
-        cash_data = flex.get_cash_balance()
-        
-        return CashBalanceResponse(
-            total_cash=cash_data.get('total_cash', 0),
-            currency=cash_data.get('currency', 'USD'),
-            ending_cash=cash_data.get('ending_cash', 0),
-            ending_settled_cash=cash_data.get('ending_settled_cash', 0)
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    cash_snapshot = db.get_latest_cash_snapshot()
+    if not cash_snapshot:
+        raise HTTPException(status_code=404, detail="No cash snapshot. Please run IBKR sync first.")
+
+    return CashBalanceResponse(
+        total_cash=float(cash_snapshot.get('total_cash', 0) or 0),
+        currency=str(cash_snapshot.get('currency', 'USD') or 'USD'),
+        ending_cash=float(cash_snapshot.get('total_cash', 0) or 0),
+        ending_settled_cash=float(cash_snapshot.get('total_settled_cash', 0) or 0),
+    )
 
 
 # ========== AI 分析 ==========
@@ -548,8 +728,9 @@ async def get_cash_balance():
 @app.post("/api/ai/chat", response_model=AIAnalysisResponse)
 async def ai_chat(request: AIAnalysisRequest):
     """AI 對話（自動包含持倉和統計數據）"""
-    if not ai_coach:
-        raise HTTPException(status_code=503, detail="AI service not available")
+    coach = get_ai_coach()
+    if not coach:
+        raise HTTPException(status_code=503, detail="AI 服務未設定，請到設定頁面設定 API Key")
     
     try:
         # 構建完整的上下文資訊
@@ -612,7 +793,7 @@ async def ai_chat(request: AIAnalysisRequest):
 請用繁體中文回答，提供具體、可執行的建議。"""
         
         # 取得 AI 回應
-        response = ai_coach.chat(prompt)
+        response = coach.chat(prompt)
         
         # 生成 session_id
         session_id = request.session_id or f"session_{datetime.now().strftime('%Y%m%d%H%M%S')}"
@@ -629,8 +810,9 @@ async def ai_chat(request: AIAnalysisRequest):
 @app.post("/api/ai/analyze-portfolio")
 async def analyze_portfolio():
     """AI 分析整體投資組合"""
-    if not ai_coach:
-        raise HTTPException(status_code=503, detail="AI service not available")
+    coach = get_ai_coach()
+    if not coach:
+        raise HTTPException(status_code=503, detail="AI 服務未設定，請到設定頁面設定 API Key")
     
     try:
         trades = db.get_trades()
@@ -653,7 +835,7 @@ async def analyze_portfolio():
             summary += f"\n- {symbol}: ${pnl:,.2f}"
         
         prompt = f"{summary}\n\nPlease provide a comprehensive analysis of this portfolio."
-        response = ai_coach.chat(prompt)
+        response = coach.chat(prompt)
         
         return {"analysis": response}
     except Exception as e:
@@ -676,8 +858,278 @@ async def get_settings():
 @app.put("/api/settings")
 async def update_settings(language: Optional[str] = None, theme: Optional[str] = None):
     """更新系統設定"""
-    # 這裡可以存到資料庫或設定檔
     return {"message": "Settings updated", "language": language, "theme": theme}
+
+
+def _get_config(key: str, default: str = "") -> str:
+    """從資料庫或環境變數取得設定（資料庫優先）"""
+    db_value = db.get_setting(key)
+    if db_value:
+        return db_value
+    return os.getenv(key, default)
+
+
+@app.get("/api/config/status")
+async def get_config_status():
+    """取得所有設定狀態（從資料庫讀取）"""
+    ibkr_token = _get_config("IBKR_FLEX_TOKEN", "")
+    ibkr_history_id = _get_config("IBKR_HISTORY_QUERY_ID", "")
+    ibkr_positions_id = _get_config("IBKR_POSITIONS_QUERY_ID", "")
+    gemini_key = _get_config("GEMINI_API_KEY", "")
+    deepseek_key = _get_config("DEEPSEEK_API_KEY", "")
+    openai_key = _get_config("OPENAI_API_KEY", "")
+    ai_provider = _get_config("AI_PROVIDER", "gemini")
+    
+    return {
+        "ibkr": {
+            "configured": bool(ibkr_token and ibkr_history_id),
+            "token_set": bool(ibkr_token),
+            "token_preview": f"{ibkr_token[:8]}...{ibkr_token[-4:]}" if len(ibkr_token) > 12 else "",
+            "history_query_id": ibkr_history_id,
+            "positions_query_id": ibkr_positions_id,
+        },
+        "ai": {
+            "configured": bool(gemini_key or deepseek_key or openai_key),
+            "provider": ai_provider,
+            "gemini_set": bool(gemini_key),
+            "deepseek_set": bool(deepseek_key),
+            "openai_set": bool(openai_key),
+        }
+    }
+
+
+@app.post("/api/config/validate", response_model=ConfigValidationResponse)
+async def validate_config(request: ConfigValidationRequest):
+    """驗證設定是否有效"""
+    
+    if request.config_type == "ibkr":
+        return await _validate_ibkr_config(request)
+    elif request.config_type == "gemini":
+        return await _validate_gemini_config(request)
+    elif request.config_type == "deepseek":
+        return await _validate_deepseek_config(request)
+    elif request.config_type == "openai":
+        return await _validate_openai_config(request)
+    else:
+        return ConfigValidationResponse(
+            success=False,
+            message=f"Unknown config type: {request.config_type}"
+        )
+
+
+async def _validate_ibkr_config(request: ConfigValidationRequest) -> ConfigValidationResponse:
+    """驗證 IBKR Flex Query 設定"""
+    import requests
+    import xml.etree.ElementTree as ET
+    
+    token = request.token or _get_config("IBKR_FLEX_TOKEN", "")
+    query_id = request.query_id or _get_config("IBKR_HISTORY_QUERY_ID", "")
+    
+    if not token or not query_id:
+        return ConfigValidationResponse(
+            success=False,
+            message="IBKR Token 或 Query ID 未設定"
+        )
+    
+    try:
+        # Step 1: 請求報告
+        request_url = f"https://gdcdyn.interactivebrokers.com/Universal/servlet/FlexStatementService.SendRequest?t={token}&q={query_id}&v=3"
+        response = requests.get(request_url, timeout=30)
+        
+        if response.status_code != 200:
+            return ConfigValidationResponse(
+                success=False,
+                message=f"IBKR API 請求失敗: HTTP {response.status_code}"
+            )
+        
+        # 解析 XML 回應
+        root = ET.fromstring(response.text)
+        status = root.find('.//Status')
+        
+        if status is not None and status.text == 'Success':
+            reference_code = root.find('.//ReferenceCode')
+            return ConfigValidationResponse(
+                success=True,
+                message="IBKR Flex Query 設定有效！",
+                details={
+                    "reference_code": reference_code.text if reference_code is not None else None,
+                    "query_id": query_id
+                }
+            )
+        else:
+            error_msg = root.find('.//ErrorMessage')
+            return ConfigValidationResponse(
+                success=False,
+                message=f"IBKR 驗證失敗: {error_msg.text if error_msg is not None else 'Unknown error'}",
+                details={"raw_response": response.text[:500]}
+            )
+    except ET.ParseError:
+        return ConfigValidationResponse(
+            success=False,
+            message="IBKR 回應格式錯誤，請檢查 Token 和 Query ID"
+        )
+    except requests.RequestException as e:
+        return ConfigValidationResponse(
+            success=False,
+            message=f"網路連線錯誤: {str(e)}"
+        )
+    except Exception as e:
+        return ConfigValidationResponse(
+            success=False,
+            message=f"驗證過程發生錯誤: {str(e)}"
+        )
+
+
+async def _validate_gemini_config(request: ConfigValidationRequest) -> ConfigValidationResponse:
+    """驗證 Gemini API 設定"""
+    import requests
+    
+    api_key = request.token or _get_config("GEMINI_API_KEY", "")
+    
+    if not api_key:
+        return ConfigValidationResponse(
+            success=False,
+            message="Gemini API Key 未設定"
+        )
+    
+    try:
+        # 測試 API 連線
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            models = [m.get('name', '').split('/')[-1] for m in data.get('models', [])[:5]]
+            return ConfigValidationResponse(
+                success=True,
+                message="Gemini API 連線成功！",
+                details={"available_models": models}
+            )
+        elif response.status_code == 400:
+            return ConfigValidationResponse(
+                success=False,
+                message="Gemini API Key 無效"
+            )
+        else:
+            return ConfigValidationResponse(
+                success=False,
+                message=f"Gemini API 錯誤: HTTP {response.status_code}"
+            )
+    except Exception as e:
+        return ConfigValidationResponse(
+            success=False,
+            message=f"Gemini 驗證失敗: {str(e)}"
+        )
+
+
+async def _validate_deepseek_config(request: ConfigValidationRequest) -> ConfigValidationResponse:
+    """驗證 DeepSeek API 設定"""
+    import requests
+    
+    api_key = request.token or _get_config("DEEPSEEK_API_KEY", "")
+    
+    if not api_key:
+        return ConfigValidationResponse(
+            success=False,
+            message="DeepSeek API Key 未設定"
+        )
+    
+    try:
+        # 測試 API 連線
+        url = "https://api.deepseek.com/v1/models"
+        headers = {"Authorization": f"Bearer {api_key}"}
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            models = [m.get('id', '') for m in data.get('data', [])[:5]]
+            return ConfigValidationResponse(
+                success=True,
+                message="DeepSeek API 連線成功！",
+                details={"available_models": models}
+            )
+        elif response.status_code == 401:
+            return ConfigValidationResponse(
+                success=False,
+                message="DeepSeek API Key 無效"
+            )
+        else:
+            return ConfigValidationResponse(
+                success=False,
+                message=f"DeepSeek API 錯誤: HTTP {response.status_code}"
+            )
+    except Exception as e:
+        return ConfigValidationResponse(
+            success=False,
+            message=f"DeepSeek 驗證失敗: {str(e)}"
+        )
+
+
+async def _validate_openai_config(request: ConfigValidationRequest) -> ConfigValidationResponse:
+    """驗證 OpenAI API 設定"""
+    import requests
+    
+    api_key = request.token or _get_config("OPENAI_API_KEY", "")
+    
+    if not api_key:
+        return ConfigValidationResponse(
+            success=False,
+            message="OpenAI API Key 未設定"
+        )
+    
+    try:
+        url = "https://api.openai.com/v1/models"
+        headers = {"Authorization": f"Bearer {api_key}"}
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            models = [m.get('id', '') for m in data.get('data', []) if 'gpt' in m.get('id', '')][:5]
+            return ConfigValidationResponse(
+                success=True,
+                message="OpenAI API 連線成功！",
+                details={"available_models": models}
+            )
+        elif response.status_code == 401:
+            return ConfigValidationResponse(
+                success=False,
+                message="OpenAI API Key 無效"
+            )
+        else:
+            return ConfigValidationResponse(
+                success=False,
+                message=f"OpenAI API 錯誤: HTTP {response.status_code}"
+            )
+    except Exception as e:
+        return ConfigValidationResponse(
+            success=False,
+            message=f"OpenAI 驗證失敗: {str(e)}"
+        )
+
+
+@app.post("/api/config/save")
+async def save_config(request: SaveConfigRequest):
+    """儲存設定到資料庫（即時生效，不需重啟）"""
+    try:
+        # 儲存到資料庫
+        if request.ibkr_flex_token:
+            db.set_setting('IBKR_FLEX_TOKEN', request.ibkr_flex_token)
+        if request.ibkr_history_query_id:
+            db.set_setting('IBKR_HISTORY_QUERY_ID', request.ibkr_history_query_id)
+        if request.ibkr_positions_query_id:
+            db.set_setting('IBKR_POSITIONS_QUERY_ID', request.ibkr_positions_query_id)
+        if request.gemini_api_key:
+            db.set_setting('GEMINI_API_KEY', request.gemini_api_key)
+        if request.deepseek_api_key:
+            db.set_setting('DEEPSEEK_API_KEY', request.deepseek_api_key)
+        if request.openai_api_key:
+            db.set_setting('OPENAI_API_KEY', request.openai_api_key)
+        if request.ai_provider:
+            db.set_setting('AI_PROVIDER', request.ai_provider)
+        
+        return {"success": True, "message": "設定已儲存，即時生效！"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"儲存設定失敗: {str(e)}")
 
 
 # ========== 資料庫維護 ==========
@@ -1191,6 +1643,229 @@ async def get_market_history(symbol: str, period: str = "1mo"):
         return {"data": data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========== 交易檢討：K 線圖 + 買賣點 ==========
+
+class ChartDataResponse(BaseModel):
+    """K 線圖數據 + 買賣點"""
+    symbol: str
+    ohlc: List[Dict[str, Any]]
+    trades: List[Dict[str, Any]]
+    summary: Dict[str, Any]
+
+
+@app.get("/api/review/chart/{underlying}")
+async def get_review_chart_data(underlying: str, period: str = "1y"):
+    """
+    獲取交易檢討用的 K 線圖數據和買賣點
+    
+    - 下載該股票的歷史 K 線數據
+    - 合併該 underlying 的所有交易（股票+選擇權）
+    - 返回 AI 需要的完整上下文
+    """
+    try:
+        import yfinance as yf
+        from datetime import datetime as dt
+        parser = InstrumentParser()
+        
+        # 日期格式化輔助函數
+        def format_date(date_val) -> str:
+            """確保日期格式為 yyyy-mm-dd"""
+            if date_val is None:
+                return ""
+            if isinstance(date_val, str):
+                # 如果是 yyyymmdd 格式
+                if len(date_val) == 8 and date_val.isdigit():
+                    return f"{date_val[:4]}-{date_val[4:6]}-{date_val[6:8]}"
+                # 如果已經是 yyyy-mm-dd 格式
+                if len(date_val) >= 10 and date_val[4] == '-':
+                    return date_val[:10]
+                # 如果包含 T (ISO 格式)
+                if 'T' in date_val:
+                    return date_val.split('T')[0]
+                # 其他格式嘗試解析
+                try:
+                    parsed_date = dt.fromisoformat(date_val.replace('Z', '+00:00'))
+                    return parsed_date.strftime('%Y-%m-%d')
+                except:
+                    return date_val[:10] if len(date_val) >= 10 else date_val
+            # 如果是 datetime 對象
+            try:
+                return date_val.strftime('%Y-%m-%d')
+            except:
+                return str(date_val)[:10]
+        
+        # 1. 獲取 K 線數據（緩存優先，增量更新）
+        from datetime import datetime as dt, timedelta
+        
+        # 檢查緩存中最新的日期
+        cached_latest = db.get_ohlc_latest_date(underlying)
+        today = dt.now().strftime('%Y-%m-%d')
+        
+        # 從緩存讀取數據
+        cached_data = db.get_ohlc_cache(underlying)
+        
+        # 決定是否需要從網絡下載
+        need_download = False
+        download_start = None
+        
+        if not cached_data:
+            # 緩存為空，需要下載全部
+            need_download = True
+        elif cached_latest and cached_latest < today:
+            # 緩存不是最新的，需要增量更新
+            need_download = True
+            # 從緩存最新日期的次日開始下載
+            latest_date = dt.strptime(cached_latest, '%Y-%m-%d')
+            download_start = (latest_date + timedelta(days=1)).strftime('%Y-%m-%d')
+        
+        if need_download:
+            ticker = yf.Ticker(underlying)
+            
+            if download_start:
+                # 增量下載（只下載新數據）
+                hist = ticker.history(start=download_start)
+            else:
+                # 全量下載
+                hist = ticker.history(period=period)
+            
+            if not hist.empty:
+                new_ohlc = []
+                for idx, row in hist.iterrows():
+                    new_ohlc.append({
+                        "date": idx.strftime('%Y-%m-%d'),
+                        "open": round(row['Open'], 2),
+                        "high": round(row['High'], 2),
+                        "low": round(row['Low'], 2),
+                        "close": round(row['Close'], 2),
+                        "volume": int(row['Volume'])
+                    })
+                
+                # 保存到緩存
+                if new_ohlc:
+                    db.save_ohlc_data(underlying, new_ohlc)
+                    # 重新讀取完整緩存
+                    cached_data = db.get_ohlc_cache(underlying)
+        
+        # 使用緩存數據
+        ohlc_data = cached_data if cached_data else []
+        
+        if not ohlc_data:
+            raise HTTPException(status_code=404, detail=f"No data found for {underlying}")
+        
+        # 2. 獲取該 underlying 的所有交易（股票 + 選擇權）
+        all_trades = db.get_trades()
+        underlying_trades = []
+        total_realized_pnl = 0
+        stock_trades = []
+        option_trades = []
+        
+        for t in all_trades:
+            parsed = parser.parse_symbol(t['symbol'])
+            if parsed['underlying'].upper() == underlying.upper():
+                trade_date = format_date(t.get('datetime') or t.get('date'))
+                trade_info = {
+                    "date": trade_date,
+                    "datetime": str(t.get('datetime', '')),
+                    "symbol": t['symbol'],
+                    "action": t['action'],
+                    "quantity": t['quantity'],
+                    "price": t['price'],
+                    "realized_pnl": t.get('realized_pnl', 0),
+                    "instrument_type": parsed.get('instrument_type', 'stock'),
+                    "is_option": parsed.get('instrument_type') == 'option',
+                    "strike": parsed.get('strike'),
+                    "expiry": parsed.get('expiry'),
+                    "option_type": parsed.get('option_type')
+                }
+                underlying_trades.append(trade_info)
+                total_realized_pnl += t.get('realized_pnl', 0)
+                
+                if parsed.get('instrument_type') == 'option':
+                    option_trades.append(trade_info)
+                else:
+                    stock_trades.append(trade_info)
+        
+        # 3. 計算摘要統計
+        buy_trades = [t for t in underlying_trades if t['action'].upper() in ['BUY', 'BOT']]
+        sell_trades = [t for t in underlying_trades if t['action'].upper() in ['SELL', 'SLD']]
+        
+        summary = {
+            "underlying": underlying,
+            "current_price": round(hist['Close'].iloc[-1], 2) if len(hist) > 0 else 0,
+            "total_trades": len(underlying_trades),
+            "stock_trades": len(stock_trades),
+            "option_trades": len(option_trades),
+            "buy_count": len(buy_trades),
+            "sell_count": len(sell_trades),
+            "total_realized_pnl": round(total_realized_pnl, 2),
+            "avg_buy_price": round(sum(t['price'] for t in buy_trades) / len(buy_trades), 2) if buy_trades else 0,
+            "avg_sell_price": round(sum(t['price'] for t in sell_trades) / len(sell_trades), 2) if sell_trades else 0,
+        }
+        
+        return {
+            "symbol": underlying,
+            "ohlc": ohlc_data,
+            "trades": underlying_trades,
+            "summary": summary
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/symbols/grouped")
+async def get_grouped_symbols():
+    """
+    獲取按 underlying 分組的標的清單
+    合併同一 underlying 的股票和選擇權
+    """
+    parser = InstrumentParser()
+    trades = db.get_trades()
+    
+    underlying_stats = {}
+    
+    for t in trades:
+        parsed = parser.parse_symbol(t['symbol'])
+        underlying = parsed['underlying']
+        
+        if underlying not in underlying_stats:
+            underlying_stats[underlying] = {
+                "underlying": underlying,
+                "stock_trades": 0,
+                "option_trades": 0,
+                "total_pnl": 0,
+                "symbols": set()
+            }
+        
+        underlying_stats[underlying]['symbols'].add(t['symbol'])
+        underlying_stats[underlying]['total_pnl'] += t.get('realized_pnl', 0)
+        
+        if parsed.get('instrument_type') == 'option':
+            underlying_stats[underlying]['option_trades'] += 1
+        else:
+            underlying_stats[underlying]['stock_trades'] += 1
+    
+    # 轉換 set 為 list，排序
+    result = []
+    for underlying, stats in underlying_stats.items():
+        result.append({
+            "underlying": underlying,
+            "stock_trades": stats['stock_trades'],
+            "option_trades": stats['option_trades'],
+            "total_pnl": round(stats['total_pnl'], 2),
+            "symbols": sorted(list(stats['symbols']))
+        })
+    
+    # 按交易數量排序
+    result.sort(key=lambda x: x['stock_trades'] + x['option_trades'], reverse=True)
+    
+    return result
+
+
 
 
 if __name__ == "__main__":

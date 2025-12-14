@@ -169,6 +169,16 @@ class TradingDatabase:
             )
         """)
 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cash_snapshots (
+                snapshot_date TEXT PRIMARY KEY,
+                total_cash REAL NOT NULL,
+                total_settled_cash REAL NOT NULL,
+                currency TEXT DEFAULT 'USD',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # 建立索引
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_positions_snapshot
@@ -178,6 +188,42 @@ class TradingDatabase:
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_positions_symbol
             ON open_positions(symbol)
+        """)
+
+        # 建立 Settings 表（系統設定）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # 建立 OHLC 緩存表（K 線數據緩存）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ohlc_cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                date TEXT NOT NULL,
+                open REAL NOT NULL,
+                high REAL NOT NULL,
+                low REAL NOT NULL,
+                close REAL NOT NULL,
+                volume INTEGER NOT NULL,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(symbol, date)
+            )
+        """)
+
+        # 建立索引
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ohlc_symbol
+            ON ohlc_cache(symbol)
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ohlc_symbol_date
+            ON ohlc_cache(symbol, date)
         """)
 
         conn.commit()
@@ -402,11 +448,11 @@ class TradingDatabase:
                     pos.get('average_cost'),
                     pos.get('unrealized_pnl', 0),
                     parsed.get('instrument_type', 'stock'),
-                    parsed.get('underlying'),
-                    parsed.get('strike'),
-                    parsed.get('expiry'),
-                    parsed.get('option_type'),
-                    parsed.get('multiplier', 1)
+                    pos.get('underlying') or parsed.get('underlying'),
+                    pos.get('strike') if pos.get('strike') is not None else parsed.get('strike'),
+                    pos.get('expiry') or parsed.get('expiry'),
+                    pos.get('option_type') or parsed.get('option_type'),
+                    int(pos.get('multiplier')) if pos.get('multiplier') else parsed.get('multiplier', 1)
                 ))
                 inserted_count += 1
             except Exception as e:
@@ -448,6 +494,41 @@ class TradingDatabase:
         positions = [dict(row) for row in cursor.fetchall()]
         conn.close()
         return positions
+
+    def upsert_cash_snapshot(
+        self,
+        total_cash: float,
+        total_settled_cash: float,
+        currency: str = 'USD',
+        snapshot_date: str = None,
+    ) -> None:
+        if snapshot_date is None:
+            snapshot_date = datetime.now().strftime('%Y-%m-%d')
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO cash_snapshots (snapshot_date, total_cash, total_settled_cash, currency, created_at)
+            VALUES (?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(snapshot_date) DO UPDATE SET
+                total_cash = excluded.total_cash,
+                total_settled_cash = excluded.total_settled_cash,
+                currency = excluded.currency,
+                created_at = datetime('now')
+        """, (snapshot_date, total_cash, total_settled_cash, currency))
+        conn.commit()
+        conn.close()
+
+    def get_latest_cash_snapshot(self) -> Optional[Dict[str, Any]]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM cash_snapshots
+            WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM cash_snapshots)
+        """)
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
 
     def get_positions_by_date(self, snapshot_date: str) -> List[Dict[str, Any]]:
         """
@@ -912,6 +993,218 @@ class TradingDatabase:
         else:
             cursor.execute("SELECT * FROM backtest_results ORDER BY created_at DESC")
 
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
+    # ========== Settings 管理 ==========
+
+    def get_setting(self, key: str, default: str = None) -> Optional[str]:
+        """
+        取得設定值
+
+        Args:
+            key: 設定鍵名
+            default: 預設值
+
+        Returns:
+            設定值或預設值
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        conn.close()
+        return row['value'] if row else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        """
+        設定值（新增或更新）
+
+        Args:
+            key: 設定鍵名
+            value: 設定值
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO settings (key, value, updated_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = datetime('now')
+        """, (key, value))
+        conn.commit()
+        conn.close()
+
+    def get_all_settings(self) -> Dict[str, str]:
+        """
+        取得所有設定
+
+        Returns:
+            設定字典
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT key, value FROM settings")
+        rows = cursor.fetchall()
+        conn.close()
+        return {row['key']: row['value'] for row in rows}
+
+    def delete_setting(self, key: str) -> None:
+        """
+        刪除設定
+
+        Args:
+            key: 設定鍵名
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM settings WHERE key = ?", (key,))
+        conn.commit()
+        conn.close()
+
+    # ========== OHLC 緩存管理 ==========
+
+    def get_ohlc_cache(self, symbol: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        獲取 OHLC 緩存數據
+
+        Args:
+            symbol: 股票代號
+            start_date: 開始日期 (yyyy-mm-dd)
+            end_date: 結束日期 (yyyy-mm-dd)
+
+        Returns:
+            OHLC 數據列表
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        query = "SELECT date, open, high, low, close, volume FROM ohlc_cache WHERE symbol = ?"
+        params = [symbol.upper()]
+
+        if start_date:
+            query += " AND date >= ?"
+            params.append(start_date)
+        if end_date:
+            query += " AND date <= ?"
+            params.append(end_date)
+
+        query += " ORDER BY date ASC"
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        conn.close()
+
+        return [dict(row) for row in rows]
+
+    def get_ohlc_latest_date(self, symbol: str) -> Optional[str]:
+        """
+        獲取某股票緩存中最新的日期
+
+        Args:
+            symbol: 股票代號
+
+        Returns:
+            最新日期 (yyyy-mm-dd) 或 None
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT MAX(date) as latest FROM ohlc_cache WHERE symbol = ?",
+            (symbol.upper(),)
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        return row['latest'] if row and row['latest'] else None
+
+    def save_ohlc_data(self, symbol: str, ohlc_data: List[Dict[str, Any]]) -> int:
+        """
+        保存 OHLC 數據到緩存
+
+        Args:
+            symbol: 股票代號
+            ohlc_data: OHLC 數據列表，每個 dict 需包含 date, open, high, low, close, volume
+
+        Returns:
+            新增或更新的記錄數
+        """
+        if not ohlc_data:
+            return 0
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        count = 0
+
+        for d in ohlc_data:
+            try:
+                cursor.execute("""
+                    INSERT INTO ohlc_cache (symbol, date, open, high, low, close, volume, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                    ON CONFLICT(symbol, date) DO UPDATE SET
+                        open = excluded.open,
+                        high = excluded.high,
+                        low = excluded.low,
+                        close = excluded.close,
+                        volume = excluded.volume,
+                        updated_at = datetime('now')
+                """, (
+                    symbol.upper(),
+                    d['date'],
+                    d['open'],
+                    d['high'],
+                    d['low'],
+                    d['close'],
+                    d['volume']
+                ))
+                count += 1
+            except Exception as e:
+                print(f"Error saving OHLC data: {e}")
+
+        conn.commit()
+        conn.close()
+        return count
+
+    def delete_ohlc_cache(self, symbol: str) -> int:
+        """
+        刪除某股票的 OHLC 緩存
+
+        Args:
+            symbol: 股票代號
+
+        Returns:
+            刪除的記錄數
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM ohlc_cache WHERE symbol = ?", (symbol.upper(),))
+        count = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return count
+
+    def get_ohlc_cache_stats(self) -> List[Dict[str, Any]]:
+        """
+        獲取 OHLC 緩存統計
+
+        Returns:
+            每個股票的緩存統計列表
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT 
+                symbol,
+                COUNT(*) as count,
+                MIN(date) as earliest,
+                MAX(date) as latest,
+                MAX(updated_at) as last_updated
+            FROM ohlc_cache
+            GROUP BY symbol
+            ORDER BY symbol
+        """)
         rows = cursor.fetchall()
         conn.close()
         return [dict(row) for row in rows]

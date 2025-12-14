@@ -218,11 +218,16 @@ class IBKRFlexQuery:
 
     BASE_URL = "https://gdcdyn.interactivebrokers.com/Universal/servlet"
 
-    def __init__(self):
+    def __init__(
+        self,
+        token: Optional[str] = None,
+        history_query_id: Optional[str] = None,
+        positions_query_id: Optional[str] = None,
+    ):
         """初始化 Flex Query 客戶端"""
-        self.token = os.getenv('IBKR_FLEX_TOKEN')
-        self.history_query_id = os.getenv('IBKR_HISTORY_QUERY_ID')
-        self.positions_query_id = os.getenv('IBKR_POSITIONS_QUERY_ID')
+        self.token = token or os.getenv('IBKR_FLEX_TOKEN')
+        self.history_query_id = history_query_id or os.getenv('IBKR_HISTORY_QUERY_ID')
+        self.positions_query_id = positions_query_id or os.getenv('IBKR_POSITIONS_QUERY_ID')
 
         if not self.token:
             raise ValueError("IBKR_FLEX_TOKEN 未設定，請在 .env 檔案中配置")
@@ -693,22 +698,136 @@ class IBKRFlexQuery:
         Returns:
             positions_df: 庫存 DataFrame
         """
+        import time
+        
         if not self.positions_query_id:
             raise ValueError("IBKR_POSITIONS_QUERY_ID 未設定")
 
         # Step 1: 請求生成報表
         reference_code = self._request_report(self.positions_query_id)
 
-        # Step 2: 取得報表
-        xml_content = self._get_report(reference_code)
+        # Step 2: 等待報表生成
+        time.sleep(5)
 
-        # Step 3: 解析 XML
-        positions = self._parse_positions_xml(xml_content)
+        # Step 3: 取得報表
+        content = self._get_report(reference_code)
+
+        # Step 4: 偵測格式並解析
+        format_type = self._detect_format(content)
+        
+        if format_type == 'csv':
+            positions = self._parse_positions_csv(content)
+        else:
+            positions = self._parse_positions_xml(content)
 
         if not positions:
             return pd.DataFrame()
 
         return pd.DataFrame(positions)
+
+    def _parse_positions_csv(self, csv_content: str) -> List[Dict]:
+        """
+        解析庫存快照 CSV（IBKR Flex Query 特殊格式）
+
+        Args:
+            csv_content: Flex Query 回傳的 CSV
+
+        Returns:
+            positions: 庫存列表
+        """
+        from io import StringIO
+        
+        # IBKR CSV 格式有多種行類型：BOF, BOA, BOS, EOS, EOA, EOF
+        # 只處理以 "STK" 或 "OPT" 開頭的數據行
+        lines = csv_content.strip().split('\n')
+        
+        # 找到 header 行（包含 AssetClass）
+        header_idx = None
+        for i, line in enumerate(lines):
+            if line.startswith('"AssetClass"') or line.startswith('AssetClass'):
+                header_idx = i
+                break
+        
+        if header_idx is None:
+            # 嘗試使用標準 CSV 解析
+            try:
+                df = pd.read_csv(StringIO(csv_content))
+                positions = []
+                for _, row in df.iterrows():
+                    if 'Symbol' not in row or pd.isna(row.get('Symbol')):
+                        continue
+                    position_data = {
+                        'symbol': str(row.get('Symbol', '')),
+                        'position': float(row.get('Position', row.get('Quantity', 0))),
+                        'mark_price': float(row.get('MarkPrice', row.get('Mark', 0))),
+                        'average_cost': float(row.get('CostBasisPrice', row.get('AvgCost', 0))),
+                        'unrealized_pnl': float(row.get('FifoPnlUnrealized', row.get('UnrealizedP/L', 0))),
+                        'asset_category': str(row.get('AssetClass', 'STK')),
+                        'description': str(row.get('Description', '')),
+                        'put_call': str(row.get('Put/Call', '')),
+                        'strike': str(row.get('Strike', '')),
+                        'expiry': str(row.get('Expiry', '')),
+                        'multiplier': str(row.get('Multiplier', '1')),
+                    }
+                    positions.append(position_data)
+                return positions
+            except Exception:
+                return []
+        
+        # 解析 header
+        header_line = lines[header_idx]
+        headers = [h.strip().strip('"') for h in header_line.split(',')]
+        
+        positions = []
+        
+        # 解析數據行（從 header 之後開始）
+        for line in lines[header_idx + 1:]:
+            # 跳過非數據行
+            if not line.startswith('"STK"') and not line.startswith('"OPT"'):
+                continue
+            
+            # 解析 CSV 行
+            values = []
+            in_quote = False
+            current = ''
+            for char in line:
+                if char == '"':
+                    in_quote = not in_quote
+                elif char == ',' and not in_quote:
+                    values.append(current.strip().strip('"'))
+                    current = ''
+                else:
+                    current += char
+            values.append(current.strip().strip('"'))  # 最後一個值
+            
+            # 建立字典
+            row_dict = {}
+            for i, h in enumerate(headers):
+                if i < len(values):
+                    row_dict[h] = values[i]
+            
+            # 轉換為 position_data
+            try:
+                position_data = {
+                    'symbol': row_dict.get('Symbol', ''),
+                    'position': float(row_dict.get('Quantity', 0)),
+                    'mark_price': float(row_dict.get('MarkPrice', 0)),
+                    'average_cost': float(row_dict.get('CostBasisPrice', 0)),
+                    'unrealized_pnl': float(row_dict.get('FifoPnlUnrealized', 0)),
+                    'asset_category': row_dict.get('AssetClass', 'STK'),
+                    'description': '',
+                    'put_call': row_dict.get('Put/Call', ''),
+                    'strike': row_dict.get('Strike', ''),
+                    'expiry': row_dict.get('Expiry', ''),
+                    'multiplier': row_dict.get('Multiplier', '1'),
+                }
+                positions.append(position_data)
+            except (ValueError, KeyError) as e:
+                print(f"解析行失敗: {line}, 錯誤: {e}")
+                continue
+        
+        return positions
+
 
     def get_historical_trades(
         self,

@@ -93,6 +93,60 @@ export interface AIResponse {
   session_id: string;
 }
 
+// K 線圖數據
+export interface OHLCData {
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface ChartTrade {
+  date: string;
+  datetime: string;
+  symbol: string;
+  action: string;
+  quantity: number;
+  price: number;
+  realized_pnl: number;
+  instrument_type: string;
+  is_option: boolean;
+  strike?: number;
+  expiry?: string;
+  option_type?: string;
+}
+
+export interface ChartSummary {
+  underlying: string;
+  current_price: number;
+  total_trades: number;
+  stock_trades: number;
+  option_trades: number;
+  buy_count: number;
+  sell_count: number;
+  total_realized_pnl: number;
+  avg_buy_price: number;
+  avg_sell_price: number;
+}
+
+export interface ReviewChartData {
+  symbol: string;
+  ohlc: OHLCData[];
+  trades: ChartTrade[];
+  summary: ChartSummary;
+}
+
+export interface GroupedSymbol {
+  underlying: string;
+  stock_trades: number;
+  option_trades: number;
+  total_pnl: number;
+  symbols: string[];
+}
+
+
 export interface SyncResult {
   success: boolean;
   trades_synced: number;
@@ -212,14 +266,28 @@ export const apiClient = {
     return data.pnl_by_symbol;
   },
 
-  // Statistics
-  async getStatistics() {
-    const { data } = await api.get<Statistics>('/api/statistics');
+  // 交易檢討：K 線圖 + 買賣點
+  async getReviewChartData(underlying: string, period: string = '1y') {
+    const { data } = await api.get<ReviewChartData>(`/api/review/chart/${underlying}`, {
+      params: { period }
+    });
     return data;
   },
 
-  async getEquityCurve() {
-    const { data } = await api.get<{ data: EquityCurvePoint[] }>('/api/equity-curve');
+  async getGroupedSymbols() {
+    const { data } = await api.get<GroupedSymbol[]>('/api/symbols/grouped');
+    return data;
+  },
+
+
+  // Statistics
+  async getStatistics(params?: { start_date?: string; end_date?: string }) {
+    const { data } = await api.get<Statistics>('/api/statistics', { params });
+    return data;
+  },
+
+  async getEquityCurve(params?: { start_date?: string; end_date?: string }) {
+    const { data } = await api.get<{ data: EquityCurvePoint[] }>('/api/equity-curve', { params });
     return data.data;
   },
 
