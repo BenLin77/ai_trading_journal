@@ -469,36 +469,37 @@ async def get_portfolio():
                 'realized_pnl': 0
             }
         
-        asset_cat = pos.get('asset_category')
-        if not asset_cat:
-            instrument_type = str(pos.get('instrument_type', 'stock') or 'stock').lower()
-            asset_cat = 'OPT' if instrument_type == 'option' else 'STK'
+        # 優先使用 InstrumentParser 判斷類型（最準確）
+        instrument_type = parsed.get('instrument_type', 'stock')
+        is_option = instrument_type == 'option'
+        
+        # 備選：從資料庫欄位判斷
+        if not is_option:
+            asset_cat = pos.get('asset_category')
+            if asset_cat == 'OPT':
+                is_option = True
+            elif str(pos.get('instrument_type', '')).lower() == 'option':
+                is_option = True
+        
         quantity = pos.get('position', 0)
         mark_price = pos.get('mark_price', 0)
         avg_cost = pos.get('average_cost', 0)
         unrealized = pos.get('unrealized_pnl', 0)
         
-        if asset_cat == 'STK':
-            grouped_positions[underlying]['stock_quantity'] = quantity
-            grouped_positions[underlying]['stock_cost'] = avg_cost
-            grouped_positions[underlying]['stock_price'] = mark_price
-            grouped_positions[underlying]['stock_value'] = quantity * mark_price
-            grouped_positions[underlying]['stock_unrealized'] = unrealized
-        elif asset_cat == 'OPT':
-            put_call = pos.get('put_call')
-            if not put_call:
-                opt_type = str(pos.get('option_type', '') or '').lower()
-                if opt_type in ['call', 'c']:
-                    put_call = 'C'
-                elif opt_type in ['put', 'p']:
-                    put_call = 'P'
+        if is_option:
+            # 選擇權
+            put_call = pos.get('put_call') or parsed.get('option_type', '')
+            if put_call in ['Call', 'call']:
+                put_call = 'C'
+            elif put_call in ['Put', 'put']:
+                put_call = 'P'
 
             multiplier = int(pos.get('multiplier', 100) or 100)
             grouped_positions[underlying]['options'].append({
                 'symbol': symbol,
                 'option_type': 'call' if put_call == 'C' else 'put',
-                'strike': float(pos.get('strike', 0)) if pos.get('strike') else 0,
-                'expiry': pos.get('expiry', ''),
+                'strike': float(parsed.get('strike') or pos.get('strike', 0) or 0),
+                'expiry': parsed.get('expiry') or pos.get('expiry', ''),
                 'quantity': int(abs(quantity)),
                 'action': 'buy' if quantity > 0 else 'sell',
                 'net_quantity': quantity,
@@ -506,6 +507,13 @@ async def get_portfolio():
                 'unrealized_pnl': unrealized,
                 'multiplier': multiplier,
             })
+        else:
+            # 股票
+            grouped_positions[underlying]['stock_quantity'] = quantity
+            grouped_positions[underlying]['stock_cost'] = avg_cost
+            grouped_positions[underlying]['stock_price'] = mark_price
+            grouped_positions[underlying]['stock_value'] = quantity * mark_price
+            grouped_positions[underlying]['stock_unrealized'] = unrealized
     
     # 取得已實現盈虧
     pnl_by_symbol = db.get_pnl_by_symbol()

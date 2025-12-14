@@ -56,6 +56,25 @@ class InstrumentParser:
             })
             return result
 
+        # 選擇權格式 1.5: IBKR OCC 帶空格格式 (ONDS  260116C00011000)
+        # 格式: [Underlying]  [YYMMDD][C/P][8位價格] (中間有1-2個空格)
+        ibkr_occ_pattern = r'^([A-Z]+)\s+(\d{6})([CP])(\d{8})$'
+        match = re.match(ibkr_occ_pattern, symbol)
+
+        if match:
+            underlying, date_str, option_type, strike_str = match.groups()
+
+            result.update({
+                'instrument_type': 'option',
+                'underlying': underlying.strip(),
+                'expiry': datetime.strptime('20' + date_str, '%Y%m%d').strftime('%Y-%m-%d'),
+                'option_type': 'Call' if option_type == 'C' else 'Put',
+                'strike': float(strike_str) / 1000,  # Strike 以千為單位
+                'multiplier': 100
+            })
+            return result
+
+
         # 選擇權格式 2: 人類可讀格式 (AAPL 2024-01-19 150 Call)
         readable_pattern = r'^([A-Z]+)\s+(\d{4}-\d{2}-\d{2})\s+([\d.]+)\s+(Call|Put)$'
         match = re.match(readable_pattern, symbol, re.IGNORECASE)
