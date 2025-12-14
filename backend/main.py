@@ -441,9 +441,22 @@ async def get_portfolio():
     # 先嘗試從資料庫取得最新持倉快照
     positions_raw = db.get_latest_positions()
     
-    # 如果沒有持倉快照，從交易記錄計算持倉
+    # 始終計算交易記錄推導的持倉，用於補全遺漏的數據（例如 VIX 指數選擇權可能不在持倉快照中）
+    calculated_positions = _calculate_positions_from_trades()
+    
     if not positions_raw:
-        positions_raw = _calculate_positions_from_trades()
+        positions_raw = calculated_positions
+    else:
+        # 合併邏輯：以 positions_raw (IBKR Snapshot) 為主，補全 calculated_positions 中有但 positions_raw 沒有的 symbol
+        snapshot_symbols = set(p.get('symbol', '') for p in positions_raw)
+        
+        for calc_pos in calculated_positions:
+            symbol = calc_pos.get('symbol', '')
+            # 如果 Snapshot 裡沒有這個 symbol，且計算出的持倉不為 0，則加入
+            if symbol and symbol not in snapshot_symbols and calc_pos.get('position', 0) != 0:
+                # 標記為來自計算
+                calc_pos['source'] = 'calculated'
+                positions_raw.append(calc_pos)
     
     # 使用 OptionStrategyDetector 分析策略
     import pandas as pd

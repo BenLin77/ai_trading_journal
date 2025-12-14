@@ -782,9 +782,16 @@ class IBKRFlexQuery:
         
         # 解析數據行（從 header 之後開始）
         for line in lines[header_idx + 1:]:
-            # 跳過非數據行
-            if not line.startswith('"STK"') and not line.startswith('"OPT"'):
+            # 跳過 IBKR 報表控制行 (BOF, BOA, BOS, EOS, EOA, EOF)
+            if line.startswith('"BO') or line.startswith('"EO'):
                 continue
+            
+            # 放寬資產類別檢查，支援更多類型 (STK, OPT, IOPT, FUT, FOP, IND, etc.)
+            # 如果行首不是常見資產類別，可能需要檢查是否為有效數據行
+            if not any(line.startswith(f'"{prefix}') for prefix in ['STK', 'OPT', 'IOPT', 'FUT', 'FOP', 'IND', 'WAR', 'CASH']):
+                # 如果不是上述類型，但看起來像數據行（包含多個逗號），也嘗試解析
+                if line.count(',') < 5:
+                    continue
             
             # 解析 CSV 行
             values = []
