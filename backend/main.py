@@ -1427,8 +1427,11 @@ class PerformanceReportResponse(BaseModel):
 async def get_performance_report():
     """取得績效報告"""
     stats = db.get_trade_statistics()
-    pnl_by_symbol = db.get_pnl_by_symbol()
-    pnl_by_hour = db.get_pnl_by_hour()
+    pnl_by_symbol = db.get_pnl_by_symbol() or {}
+    pnl_by_hour_raw = db.get_pnl_by_hour() or {}
+    
+    # 過濾掉 None key，確保 key 是有效的整數
+    pnl_by_hour = {int(k): v for k, v in pnl_by_hour_raw.items() if k is not None}
     
     # 生成警告
     warnings = []
