@@ -110,8 +110,10 @@
 # Python 3.10+
 python --version
 
-# Node.js 18+
+# Node.js 20+ (Next.js 16 需要)
 node --version
+# 如果版本不對，使用 nvm 切換:
+# nvm install 20 && nvm use 20
 
 # uv (Python 套件管理)
 uv --version

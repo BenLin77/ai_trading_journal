@@ -15,7 +15,23 @@ if [ ! -f ".env" ]; then
     echo "⚠️  Warning: .env file not found. Copy .env.example to .env and configure it."
 fi
 
+# 檢查 Node.js 版本 (Next.js 16 需要 Node.js 20+)
+NODE_VERSION=$(node -v 2>/dev/null | sed 's/v//' | cut -d'.' -f1)
+if [ -z "$NODE_VERSION" ]; then
+    echo "❌ Node.js not found. Please install Node.js 20+"
+    exit 1
+fi
+
+if [ "$NODE_VERSION" -lt 20 ]; then
+    echo "⚠️  Node.js version too low (current: v$NODE_VERSION)"
+    echo "   Next.js 16 requires Node.js 20+. Please run:"
+    echo "   nvm install 20 && nvm use 20"
+    exit 1
+fi
+echo "✅ Node.js version: v$NODE_VERSION"
+
 # 啟動 FastAPI 後端
+echo ""
 echo "📦 Starting FastAPI backend on port 8000..."
 cd backend
 uv run uvicorn main:app --reload --host 0.0.0.0 --port 8000 &
