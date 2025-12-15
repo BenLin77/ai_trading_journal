@@ -534,6 +534,22 @@ export const apiClient = {
     const { data } = await api.post<{ review: string }>('/api/ai/comprehensive-review');
     return data.review;
   },
+
+  // ========== Telegram 報告 ==========
+  async sendDailyReportToTelegram() {
+    const { data } = await api.post<{ success: boolean; message: string }>('/api/telegram/send-daily-report');
+    return data;
+  },
+
+  async sendPlanAlertsToTelegram() {
+    const { data } = await api.post<{ success: boolean; message: string; alerts_count: number }>('/api/telegram/send-plan-alerts');
+    return data;
+  },
+
+  async previewDailyReport() {
+    const { data } = await api.get<{ success: boolean; report: string }>('/api/telegram/preview-daily-report');
+    return data.report;
+  },
 };
 
 // ========== 新增的類型定義 ==========

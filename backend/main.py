@@ -1062,6 +1062,84 @@ async def test_telegram(request: dict):
         return {"success": False, "message": f"發生錯誤: {str(e)}"}
 
 
+@app.post("/api/telegram/send-daily-report")
+async def send_daily_report_manual():
+    """手動觸發發送每日戰情報告"""
+    token = _get_config('TELEGRAM_BOT_TOKEN', '') or db.get_setting('telegram_bot_token')
+    chat_id = _get_config('TELEGRAM_CHAT_ID', '') or db.get_setting('telegram_chat_id')
+    
+    if not token or not chat_id:
+        raise HTTPException(status_code=400, detail="Telegram 尚未設定。請到設定頁面設定 Bot Token 和 Chat ID。")
+    
+    coach = get_ai_coach()
+    if not coach:
+        raise HTTPException(status_code=503, detail="AI 服務未設定，無法生成報告")
+    
+    try:
+        generator = ReportGenerator(db, coach)
+        report_md = await generator.generate_daily_report()
+        
+        notifier = TelegramNotifier(token)
+        success = notifier.send_message(chat_id, report_md)
+        
+        if success:
+            return {"success": True, "message": "每日報告已發送到 Telegram"}
+        else:
+            raise HTTPException(status_code=500, detail="Telegram 發送失敗")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"生成或發送報告失敗: {str(e)}")
+
+
+@app.post("/api/telegram/send-plan-alerts")
+async def send_plan_alerts():
+    """檢查並發送交易計劃警報"""
+    token = _get_config('TELEGRAM_BOT_TOKEN', '') or db.get_setting('telegram_bot_token')
+    chat_id = _get_config('TELEGRAM_CHAT_ID', '') or db.get_setting('telegram_chat_id')
+    
+    if not token or not chat_id:
+        raise HTTPException(status_code=400, detail="Telegram 尚未設定")
+    
+    coach = get_ai_coach()
+    if not coach:
+        raise HTTPException(status_code=503, detail="AI 服務未設定")
+    
+    try:
+        generator = ReportGenerator(db, coach)
+        alerts = await generator.check_all_plan_alerts()
+        
+        if not alerts:
+            return {"success": True, "message": "目前沒有觸發的警報", "alerts_count": 0}
+        
+        # 組合警報訊息
+        header = f"🔔 *交易計劃警報* ({datetime.now().strftime('%Y-%m-%d %H:%M')})\n\n"
+        message = header + "\n\n".join(alerts)
+        
+        notifier = TelegramNotifier(token)
+        success = notifier.send_message(chat_id, message)
+        
+        if success:
+            return {"success": True, "message": f"已發送 {len(alerts)} 條警報", "alerts_count": len(alerts)}
+        else:
+            raise HTTPException(status_code=500, detail="Telegram 發送失敗")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"檢查警報失敗: {str(e)}")
+
+
+@app.get("/api/telegram/preview-daily-report")
+async def preview_daily_report():
+    """預覽每日報告（不發送）"""
+    coach = get_ai_coach()
+    if not coach:
+        raise HTTPException(status_code=503, detail="AI 服務未設定")
+    
+    try:
+        generator = ReportGenerator(db, coach)
+        report_md = await generator.generate_daily_report()
+        return {"success": True, "report": report_md}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"生成報告失敗: {str(e)}")
+
+
 # ========== 設定 ==========
 
 @app.get("/api/settings", response_model=SettingsResponse)

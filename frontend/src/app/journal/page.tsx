@@ -1104,14 +1104,112 @@ function NoteFormModal({
 // ========== AI 綜合審查 Tab ==========
 function AIReviewTab({ language }: { language: string }) {
     const [review, setReview] = useState<string | null>(null);
+    const [dailyReport, setDailyReport] = useState<string | null>(null);
+    const [sendStatus, setSendStatus] = useState<{ type: 'success' | 'error' | null; message: string }>({ type: null, message: '' });
 
     const reviewMutation = useMutation({
         mutationFn: apiClient.getComprehensiveAIReview,
         onSuccess: (data) => setReview(data),
     });
 
+    const previewMutation = useMutation({
+        mutationFn: apiClient.previewDailyReport,
+        onSuccess: (data) => setDailyReport(data),
+    });
+
+    const sendReportMutation = useMutation({
+        mutationFn: apiClient.sendDailyReportToTelegram,
+        onSuccess: (data) => {
+            setSendStatus({ type: 'success', message: data.message });
+            setTimeout(() => setSendStatus({ type: null, message: '' }), 5000);
+        },
+        onError: (error: Error) => {
+            setSendStatus({ type: 'error', message: error.message });
+            setTimeout(() => setSendStatus({ type: null, message: '' }), 5000);
+        },
+    });
+
+    const sendAlertsMutation = useMutation({
+        mutationFn: apiClient.sendPlanAlertsToTelegram,
+        onSuccess: (data) => {
+            setSendStatus({ type: 'success', message: data.message });
+            setTimeout(() => setSendStatus({ type: null, message: '' }), 5000);
+        },
+        onError: (error: Error) => {
+            setSendStatus({ type: 'error', message: error.message });
+            setTimeout(() => setSendStatus({ type: null, message: '' }), 5000);
+        },
+    });
+
     return (
         <div className="space-y-6">
+            {/* 狀態訊息 */}
+            {sendStatus.type && (
+                <div className={cn(
+                    'p-4 rounded-lg flex items-center gap-2',
+                    sendStatus.type === 'success' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400' :
+                        'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+                )}>
+                    {sendStatus.type === 'success' ? '✅' : '❌'} {sendStatus.message}
+                </div>
+            )}
+
+            {/* Telegram 每日報告 */}
+            <Card>
+                <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                        📨 {language === 'zh' ? 'Telegram 每日報告' : 'Telegram Daily Report'}
+                    </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                    <p className="text-gray-500">
+                        {language === 'zh'
+                            ? '生成包含持倉分析、加減碼建議、交易計劃檢查的完整每日戰情報告，並發送到 Telegram。'
+                            : 'Generate and send a comprehensive daily report including position analysis, scaling suggestions, and trade plan checks.'}
+                    </p>
+                    <div className="flex gap-3 flex-wrap">
+                        <Button
+                            variant="outline"
+                            onClick={() => previewMutation.mutate()}
+                            disabled={previewMutation.isPending}
+                        >
+                            {previewMutation.isPending && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+                            {language === 'zh' ? '預覽報告' : 'Preview Report'}
+                        </Button>
+                        <Button
+                            onClick={() => sendReportMutation.mutate()}
+                            disabled={sendReportMutation.isPending}
+                        >
+                            {sendReportMutation.isPending && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+                            📨 {language === 'zh' ? '發送到 Telegram' : 'Send to Telegram'}
+                        </Button>
+                        <Button
+                            variant="secondary"
+                            onClick={() => sendAlertsMutation.mutate()}
+                            disabled={sendAlertsMutation.isPending}
+                        >
+                            {sendAlertsMutation.isPending && <Loader2 className="h-4 w-4 animate-spin mr-2" />}
+                            🔔 {language === 'zh' ? '發送計劃警報' : 'Send Plan Alerts'}
+                        </Button>
+                    </div>
+                </CardContent>
+            </Card>
+
+            {/* 預覽報告 */}
+            {dailyReport && (
+                <Card>
+                    <CardHeader>
+                        <CardTitle>{language === 'zh' ? '📋 報告預覽' : '📋 Report Preview'}</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                        <div className="prose dark:prose-invert max-w-none bg-gray-50 dark:bg-gray-900 p-4 rounded-lg">
+                            <div className="whitespace-pre-wrap text-sm">{dailyReport}</div>
+                        </div>
+                    </CardContent>
+                </Card>
+            )}
+
+            {/* AI 綜合審查 */}
             <Card>
                 <CardHeader>
                     <CardTitle className="flex items-center gap-2">
