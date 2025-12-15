@@ -640,7 +640,7 @@ export interface TradePlanInput {
 // 交易筆記類型
 export interface TradeNote {
   note_id: number;
-  note_type: 'daily' | 'trade' | 'weekly' | 'monthly' | 'misc';
+  note_type: 'daily' | 'trade' | 'mistake' | 'weekly' | 'monthly' | 'misc';
   date: string;
   symbol?: string;
   trade_id?: string;
@@ -663,7 +663,7 @@ export interface TradeNote {
 }
 
 export interface TradeNoteInput {
-  note_type?: 'daily' | 'trade' | 'weekly' | 'monthly' | 'misc';
+  note_type?: 'daily' | 'trade' | 'mistake' | 'weekly' | 'monthly' | 'misc';
   date: string;
   symbol?: string;
   trade_id?: string;

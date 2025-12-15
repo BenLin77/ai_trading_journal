@@ -849,13 +849,17 @@ function NotesTab({ language }: { language: string }) {
                                         <div className="flex items-center gap-2 mb-2">
                                             <span className={cn(
                                                 'px-2 py-0.5 rounded text-xs',
-                                                note.note_type === 'daily' ? 'bg-blue-100 text-blue-600' :
-                                                    note.note_type === 'trade' ? 'bg-emerald-100 text-emerald-600' :
-                                                        'bg-gray-100 text-gray-600'
+                                                note.note_type === 'daily' ? 'bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400' :
+                                                    note.note_type === 'trade' ? 'bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400' :
+                                                        note.note_type === 'mistake' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400' :
+                                                            note.note_type === 'weekly' ? 'bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400' :
+                                                                note.note_type === 'monthly' ? 'bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400' :
+                                                                    'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'
                                             )}>
-                                                {note.note_type}
+                                                {note.note_type === 'mistake' ? '⚠️ ' : ''}{note.note_type}
                                             </span>
                                             <span className="text-gray-500 text-sm">{note.date}</span>
+
                                             {note.symbol && (
                                                 <span className="font-medium">{note.symbol}</span>
                                             )}
@@ -989,13 +993,15 @@ function NoteFormModal({
                                     onChange={(e) => setFormData({ ...formData, note_type: e.target.value as typeof formData.note_type })}
                                     className="w-full px-3 py-2 border rounded-lg dark:bg-gray-800 dark:border-gray-600"
                                 >
-                                    <option value="daily">每日日誌</option>
-                                    <option value="trade">交易筆記</option>
-                                    <option value="weekly">週回顧</option>
-                                    <option value="monthly">月回顧</option>
-                                    <option value="misc">其他</option>
+                                    <option value="daily">📅 每日日誌</option>
+                                    <option value="trade">💹 交易筆記</option>
+                                    <option value="mistake">⚠️ 錯誤反省</option>
+                                    <option value="weekly">📊 週回顧</option>
+                                    <option value="monthly">📈 月回顧</option>
+                                    <option value="misc">📝 其他</option>
                                 </select>
                             </div>
+
                             <div>
                                 <label className="block text-sm font-medium mb-1">{language === 'zh' ? '日期' : 'Date'}</label>
                                 <input

@@ -28,7 +28,6 @@ const navItems = [
   { href: '/lab', icon: FlaskConical, labelKey: 'nav_lab' as const },
   { href: '/options', icon: Lightbulb, labelKey: 'nav_options' as const },
   { href: '/ai', icon: Bot, labelKey: 'nav_ai' as const },
-  { href: '/mistakes', icon: AlertCircle, labelKey: 'nav_mistakes' as const },
 ];
 
 export function Sidebar() {
