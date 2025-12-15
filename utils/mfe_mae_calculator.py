@@ -279,19 +279,51 @@ class MFEMAECalculator:
             elif action in ['SELL', 'SLD'] and sym in positions and positions[sym]:
                 # 出場 - 匹配最早的買入 (FIFO)
                 entry = positions[sym].pop(0)
+                instrument_type = parsed.get('instrument_type', 'stock')
 
-                # 計算 MFE/MAE
-                result = self.calculate_for_trade(
-                    trade_id=entry['trade_id'],
-                    symbol=underlying,  # 用 underlying 取 OHLC
-                    entry_date=entry['entry_date'],
-                    entry_price=entry['entry_price'],
-                    exit_date=date_str,
-                    exit_price=price,
-                    direction='long'  # TODO: 支援做空
-                )
+                # 選擇權：不用股票 OHLC 計算 MFE/MAE（數據不匹配）
+                # 只記錄實際的進出場盈虧
+                if instrument_type == 'option':
+                    # 選擇權只計算實際盈虧，MFE/MAE 設定為 realized_pnl
+                    realized_pnl = ((price - entry['entry_price']) / entry['entry_price']) * 100
+                    result = {
+                        'trade_id': entry['trade_id'],
+                        'symbol': underlying,
+                        'original_symbol': sym,
+                        'instrument_type': 'option',
+                        'entry_date': entry['entry_date'],
+                        'exit_date': date_str,
+                        'entry_price': entry['entry_price'],
+                        'exit_price': price,
+                        # 選擇權：MFE/MAE 無法用股票 OHLC 計算，設為 None
+                        'mfe': max(0, realized_pnl),  # 如果賺錢，MFE = realized
+                        'mae': min(0, realized_pnl),  # 如果賠錢，MAE = realized
+                        'mfe_price': None,
+                        'mae_price': None,
+                        'mfe_date': None,
+                        'mae_date': None,
+                        'realized_pnl': round(realized_pnl, 2),
+                        'trade_efficiency': 1.0 if realized_pnl > 0 else 0,  # 簡化效率
+                        'holding_days': 0,  # TODO: 計算實際天數
+                        'max_drawdown_from_peak': None,
+                        'direction': 'long'
+                    }
+                else:
+                    # 股票：用 underlying OHLC 計算 MFE/MAE
+                    result = self.calculate_for_trade(
+                        trade_id=entry['trade_id'],
+                        symbol=underlying,
+                        entry_date=entry['entry_date'],
+                        entry_price=entry['entry_price'],
+                        exit_date=date_str,
+                        exit_price=price,
+                        direction='long'
+                    )
+                    # 保留原始 symbol 用於分類
+                    result['original_symbol'] = sym
+                    result['instrument_type'] = 'stock'
 
-                if result.get('mfe') is not None:
+                if result.get('mfe') is not None or result.get('realized_pnl') is not None:
                     # 保存到資料庫
                     self.db.upsert_mfe_mae(result)
                     results.append(result)
@@ -303,18 +335,81 @@ class MFEMAECalculator:
         獲取交易效率分析報告
 
         Returns:
-            包含各種效率指標的分析報告
+            包含各種效率指標的分析報告（區分股票和選擇權）
         """
+        from utils.derivatives_support import InstrumentParser
+        parser = InstrumentParser()
+        
         stats = self.db.get_mfe_mae_stats()
         records = self.db.get_mfe_mae_by_symbol()
 
         if not records:
             return {
                 'total_trades': 0,
-                'message': '沒有足夠的 MFE/MAE 數據進行分析'
+                'message': '沒有足夠的 MFE/MAE 數據進行分析',
+                'stock': {'records': [], 'stats': {}},
+                'option': {'records': [], 'stats': {}},
             }
 
-        # 分類交易
+        # 區分股票和選擇權
+        stock_records = []
+        option_records = []
+        
+        for r in records:
+            # 優先使用已儲存的 instrument_type
+            instrument_type = r.get('instrument_type')
+            
+            # 如果沒有，嘗試解析 original_symbol 或 symbol
+            if not instrument_type:
+                symbol_to_parse = r.get('original_symbol') or r.get('symbol', '')
+                parsed = parser.parse_symbol(symbol_to_parse)
+                instrument_type = parsed.get('instrument_type', 'stock')
+            
+            # 添加/更新分類標記到記錄
+            r['instrument_type'] = instrument_type
+            
+            if instrument_type == 'option':
+                option_records.append(r)
+            else:
+                stock_records.append(r)
+
+        def calc_category_stats(category_records: List[Dict]) -> Dict[str, Any]:
+            """計算單個分類的統計數據"""
+            if not category_records:
+                return {
+                    'total_trades': 0,
+                    'avg_mfe': 0,
+                    'avg_mae': 0,
+                    'avg_efficiency': 0,
+                    'avg_holding_days': 0,
+                    'efficient_count': 0,
+                    'inefficient_count': 0,
+                    'efficiency_rate': 0,
+                }
+            
+            mfes = [r.get('mfe', 0) for r in category_records if r.get('mfe') is not None]
+            maes = [r.get('mae', 0) for r in category_records if r.get('mae') is not None]
+            efficiencies = [r.get('trade_efficiency', 0) for r in category_records if r.get('trade_efficiency') is not None]
+            holding_days = [r.get('holding_days', 0) for r in category_records if r.get('holding_days') is not None]
+            
+            efficient_trades = [r for r in category_records if r.get('trade_efficiency', 0) > 0.5]
+            inefficient_trades = [r for r in category_records if r.get('trade_efficiency', 0) <= 0.5 and r.get('trade_efficiency') is not None]
+            
+            return {
+                'total_trades': len(category_records),
+                'avg_mfe': sum(mfes) / len(mfes) if mfes else 0,
+                'avg_mae': sum(maes) / len(maes) if maes else 0,
+                'avg_efficiency': sum(efficiencies) / len(efficiencies) if efficiencies else 0,
+                'avg_holding_days': sum(holding_days) / len(holding_days) if holding_days else 0,
+                'efficient_count': len(efficient_trades),
+                'inefficient_count': len(inefficient_trades),
+                'efficiency_rate': len(efficient_trades) / len(category_records) * 100 if category_records else 0,
+            }
+
+        stock_stats = calc_category_stats(stock_records)
+        option_stats = calc_category_stats(option_records)
+
+        # 分類交易（整體）
         efficient_trades = [r for r in records if r.get('trade_efficiency', 0) > 0.5]
         inefficient_trades = [r for r in records if r.get('trade_efficiency', 0) <= 0.5 and r.get('trade_efficiency') is not None]
         large_mae_trades = [r for r in records if r.get('mae', 0) < -5]  # MAE > 5%
@@ -333,6 +428,16 @@ class MFEMAECalculator:
 
             'large_mae_count': len(large_mae_trades),
             'missed_mfe_count': len(missed_mfe_trades),
+
+            # 分類數據
+            'stock': {
+                'records': stock_records,
+                'stats': stock_stats,
+            },
+            'option': {
+                'records': option_records,
+                'stats': option_stats,
+            },
 
             'issues': [],
             'suggestions': []
@@ -355,6 +460,11 @@ class MFEMAECalculator:
             analysis['issues'].append('持倉時間過短：可能錯過更大的趨勢')
         elif analysis['avg_holding_days'] and analysis['avg_holding_days'] > 30:
             analysis['issues'].append('持倉時間過長：資金使用效率可能偏低')
+
+        # 選擇權特定問題
+        if option_stats['total_trades'] > 0 and option_stats['avg_mae'] < -15:
+            analysis['issues'].append('選擇權 MAE 過高 ({:.1f}%)：槓桿商品波動大，需更嚴格風控'.format(option_stats['avg_mae']))
+            analysis['suggestions'].append('選擇權建議使用更寬的初始停損，但更嚴格的時間停損')
 
         return analysis
 

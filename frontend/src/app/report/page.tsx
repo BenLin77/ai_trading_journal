@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { formatCurrency, cn, formatPercent } from '@/lib/utils';
 import { Loader2, TrendingUp, TrendingDown, AlertTriangle, Award, Target } from 'lucide-react';
+import { MarkdownRenderer } from '@/components/ui/markdown-renderer';
 
 export default function ReportPage() {
   const { language } = useAppStore();
@@ -261,9 +262,7 @@ export default function ReportPage() {
         </CardHeader>
         <CardContent>
           {aiReview ? (
-            <div className="prose dark:prose-invert max-w-none">
-              <div className="whitespace-pre-wrap text-sm">{aiReview}</div>
-            </div>
+            <MarkdownRenderer content={aiReview} />
           ) : (
             <p className="text-gray-500 text-center py-8">
               {language === 'zh' ? '點擊上方按鈕取得 AI 教練的個人化績效評語' : 'Click the button above to get personalized AI performance review'}

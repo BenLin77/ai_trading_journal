@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { formatCurrency, cn } from '@/lib/utils';
 import { Loader2, TrendingUp, Shield, Target, Zap, Send } from 'lucide-react';
+import { MarkdownRenderer } from '@/components/ui/markdown-renderer';
 
 const GOALS = [
   { value: 'add_position', label: { zh: '加碼進場', en: 'Add Position' }, icon: TrendingUp },
@@ -338,9 +339,7 @@ export default function StrategyPage() {
                 <CardTitle>{language === 'zh' ? '🧠 AI 策略師分析' : '🧠 AI Strategist Analysis'}</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="prose dark:prose-invert max-w-none">
-                  <div className="whitespace-pre-wrap text-sm">{aiAdvice}</div>
-                </div>
+                <MarkdownRenderer content={aiAdvice} />
               </CardContent>
             </Card>
           )}

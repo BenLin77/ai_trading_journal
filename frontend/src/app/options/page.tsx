@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { formatCurrency, cn } from '@/lib/utils';
 import { Loader2, TrendingUp, TrendingDown, Minus, Zap, DollarSign } from 'lucide-react';
+import { MarkdownRenderer } from '@/components/ui/markdown-renderer';
 
 const MARKET_VIEWS = [
   { value: 'bullish', label: { zh: '📈 看漲', en: '📈 Bullish' }, color: 'text-emerald-500' },
@@ -258,9 +259,7 @@ export default function OptionsPage() {
             </CardHeader>
             <CardContent>
               {advice ? (
-                <div className="prose dark:prose-invert max-w-none">
-                  <div className="whitespace-pre-wrap text-sm leading-relaxed">{advice}</div>
-                </div>
+                <MarkdownRenderer content={advice} />
               ) : (
                 <div className="text-center py-12">
                   <DollarSign className="h-16 w-16 text-gray-300 mx-auto mb-4" />

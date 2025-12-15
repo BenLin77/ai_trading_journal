@@ -494,6 +494,11 @@ export const apiClient = {
   },
 
   // ========== 交易日誌筆記 ==========
+  async getNoteAIDraft(params: { date: string; symbol?: string; note_type?: string }) {
+    const { data } = await api.post<{ draft: string }>('/api/notes/ai-draft', params);
+    return data.draft;
+  },
+
   async getTradeNotes(params?: { note_type?: string; symbol?: string; start_date?: string; end_date?: string; limit?: number }) {
     const { data } = await api.get<{ notes: TradeNote[] }>('/api/notes', { params });
     return data.notes;
@@ -600,6 +605,32 @@ export interface MFEMAEAnalysis {
   missed_mfe_count: number;
   issues: string[];
   suggestions: string[];
+  // 分類數據（股票 vs 槓桿商品：選擇權、期貨）
+  stock?: {
+    records: MFEMAERecord[];
+    stats: MFEMAECategoryStats;
+  };
+  option?: {
+    records: MFEMAERecord[];
+    stats: MFEMAECategoryStats;
+  };
+  // 未來擴展：期貨
+  futures?: {
+    records: MFEMAERecord[];
+    stats: MFEMAECategoryStats;
+  };
+}
+
+// 分類統計
+export interface MFEMAECategoryStats {
+  total_trades: number;
+  avg_mfe: number;
+  avg_mae: number;
+  avg_efficiency: number;
+  avg_holding_days: number;
+  efficient_count: number;
+  inefficient_count: number;
+  efficiency_rate: number;
 }
 
 // 交易計劃類型

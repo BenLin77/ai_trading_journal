@@ -2029,18 +2029,80 @@ async def get_mfe_mae_ai_advice(symbol: Optional[str] = None):
 
 {context}
 
-請回答：
-1. **執行品質評估**：根據 MFE/MAE 數據，評估交易執行的整體品質
-2. **主要問題**：識別最大的 2-3 個問題
+**重要提醒：選擇權策略判讀**
+- 選擇權經常作為**避險工具**使用（如 Covered Call、Protective Put、Collar 等）
+- 當選擇權標的與股票標的相同時（如 ONDS 股票 + ONDS Put），應視為**整體策略**而非獨立交易
+- 避險選擇權的「虧損」可能是**預期成本**（如保險費），不應視為交易失敗
+- MFE/MAE 對選擇權的意義不同於股票：選擇權本身波動大，要與對應股票持倉一起評估
+
+請回答（不要輸出表格，用列表格式更清晰）：
+1. **執行品質評估**（1-10分）：根據 MFE/MAE 數據，評估交易執行的整體品質
+2. **主要問題**：識別最大的 2-3 個問題（注意區分真正的問題和避險成本）
 3. **具體改進建議**：針對每個問題給出可執行的改進方案
 4. **出場策略優化**：根據數據建議更好的出場策略（例如移動停利、分批出場等）
 5. **風險控制**：基於 MAE 數據，建議停損策略的調整
 
-請用繁體中文回答，使用 Markdown 格式。"""
+請用繁體中文回答，使用 Markdown 格式（避免使用複雜表格）。"""
 
         response = coach.chat(prompt)
         return {"advice": response}
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class NoteDraftRequest(BaseModel):
+    date: str
+    symbol: Optional[str] = None
+    note_type: str = 'daily'
+
+@app.post("/api/notes/ai-draft")
+async def generate_note_draft(request: NoteDraftRequest):
+    """生成日誌草稿"""
+    coach = get_ai_coach()
+    if not coach:
+        raise HTTPException(status_code=503, detail="AI 服務未設定")
+    
+    try:
+        # 獲取當天交易數據作為上下文
+        trades = db.get_trades()
+        date_trades = [t for t in trades if t['datetime'].startswith(request.date)]
+        
+        context = ""
+        if date_trades:
+            pnl = sum(t.get('realized_pnl', 0) for t in date_trades)
+            win_count = sum(1 for t in date_trades if t.get('realized_pnl', 0) > 0)
+            context = f"當日交易統計: {len(date_trades)} 筆交易, 總盈虧 ${pnl:,.2f}, 勝率 {win_count/len(date_trades)*100:.0f}%"
+            
+            # 如果有指定標的，加強標的資訊
+            if request.symbol:
+                symbol_trades = [t for t in date_trades if t['symbol'] == request.symbol]
+                if symbol_trades:
+                    sym_pnl = sum(t.get('realized_pnl', 0) for t in symbol_trades)
+                    context += f"\n標的 {request.symbol} 表現: {len(symbol_trades)} 筆, 盈虧 ${sym_pnl:,.2f}"
+            
+            # 列出主要交易標的
+            symbols = set(t['symbol'] for t in date_trades)
+            context += f"\n交易標的: {', '.join(symbols)}"
+        else:
+            context = "當日無交易記錄。"
+
+        prompt = f"""你是一位交易員的 AI 助手。請根據以下資訊，為一份 '{request.note_type}' 類型的交易日誌寫一個草稿。
+日期: {request.date}
+標的: {request.symbol or '不限'}
+背景資訊:
+{context}
+
+請用第一人稱撰寫，包含：
+1. 今日市場觀察或交易情緒
+2. 表現檢討 (如果有交易)
+3. 明日計畫或改進點
+
+請用繁體中文，語氣專業但人性化（可以使用 emoji）。直接輸出日誌內容，不要包含 Markdown 標題（如 # 日誌），因為前端已有標題欄位。"""
+    
+        response = coach.chat(prompt)
+        return {"draft": response}
+    except Exception as e:
+        logger.error(f"Error generating note draft: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -2691,7 +2753,16 @@ async def get_review_chart_data(underlying: str, period: str = "1y"):
             download_start = (latest_date + timedelta(days=1)).strftime('%Y-%m-%d')
         
         if need_download:
-            ticker = yf.Ticker(underlying)
+            # 處理特殊的 symbol (指數需要加上 ^ 前綴)
+            yf_symbol = underlying
+            index_symbols = ['VIX', 'SPX', 'NDX', 'DJI', 'RUT', 'IXIC', 'GSPC']
+            if underlying.upper() in index_symbols:
+                yf_symbol = f'^{underlying.upper()}'
+            elif underlying.upper().startswith('VIX'):
+                # VIX 相關產品
+                yf_symbol = f'^VIX'
+            
+            ticker = yf.Ticker(yf_symbol)
             
             if download_start:
                 # 增量下載（只下載新數據）

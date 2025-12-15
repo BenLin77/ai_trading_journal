@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { formatCurrency, cn } from '@/lib/utils';
 import { Loader2, Brain, RefreshCw, FileText, PieChart, Shield, TrendingUp, AlertTriangle } from 'lucide-react';
+import { MarkdownRenderer } from '@/components/ui/markdown-renderer';
 
 export default function AIPage() {
   const { language } = useAppStore();
@@ -235,9 +236,7 @@ export default function AIPage() {
             </CardHeader>
             <CardContent>
               {analysis ? (
-                <div className="prose dark:prose-invert max-w-none">
-                  <div className="whitespace-pre-wrap text-sm leading-relaxed">{analysis}</div>
-                </div>
+                <MarkdownRenderer content={analysis} />
               ) : (
                 <div className="text-center py-16">
                   <Brain className="h-20 w-20 text-gray-200 dark:text-gray-700 mx-auto mb-4" />

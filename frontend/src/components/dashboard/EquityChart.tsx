@@ -54,8 +54,10 @@ export function EquityChart({ data }: EquityChartProps) {
   const range = maxPnL - minPnL || 1;
   const yScale = (value: number) =>
     padding.top + chartHeight - ((value - minPnL) / range) * chartHeight;
+  // 防止 data.length === 1 時除以 0
+  const xDivisor = data.length > 1 ? data.length - 1 : 1;
   const xScale = (index: number) =>
-    padding.left + (index / (data.length - 1)) * chartWidth;
+    padding.left + (index / xDivisor) * chartWidth;
 
   const pathData = data
     .map((d, i) => `${i === 0 ? 'M' : 'L'} ${xScale(i)} ${yScale(d.cumulative_pnl)}`)
@@ -163,6 +165,75 @@ export function EquityChart({ data }: EquityChartProps) {
               </text>
             </>
           )}
+
+          {/* X-Axis Time Labels */}
+          {(() => {
+            // 選擇性顯示 5 個時間點
+            const labelCount = Math.min(5, data.length);
+            const step = Math.floor(data.length / labelCount);
+            const indices = [];
+            for (let i = 0; i < labelCount; i++) {
+              indices.push(Math.min(i * step, data.length - 1));
+            }
+            // 確保最後一個點也顯示
+            if (indices[indices.length - 1] !== data.length - 1) {
+              indices.push(data.length - 1);
+            }
+
+            return indices.map((idx, i) => {
+              const point = data[idx];
+              if (!point?.datetime) return null;
+
+              // 解析多種日期格式
+              let dateStr = point.datetime;
+              let displayDate = '';
+
+              try {
+                // 嘗試解析日期
+                let date: Date;
+
+                // 格式: "2024-12-15T10:30:00"
+                if (dateStr.includes('T')) {
+                  date = new Date(dateStr);
+                }
+                // 格式: "2024-12-15 10:30:00"
+                else if (dateStr.includes(' ')) {
+                  date = new Date(dateStr.replace(' ', 'T'));
+                }
+                // 格式: "20241215"
+                else if (dateStr.length === 8 && !dateStr.includes('-')) {
+                  const y = dateStr.slice(0, 4);
+                  const m = dateStr.slice(4, 6);
+                  const d = dateStr.slice(6, 8);
+                  date = new Date(`${y}-${m}-${d}`);
+                }
+                // 格式: "2024-12-15"
+                else {
+                  date = new Date(dateStr);
+                }
+
+                if (!isNaN(date.getTime())) {
+                  displayDate = `${(date.getMonth() + 1).toString().padStart(2, '0')}/${date.getDate().toString().padStart(2, '0')}`;
+                } else {
+                  displayDate = dateStr.slice(0, 10);
+                }
+              } catch {
+                displayDate = dateStr.slice(0, 10);
+              }
+
+              return (
+                <text
+                  key={`x-label-${i}`}
+                  x={xScale(idx)}
+                  y={height - padding.bottom + 20}
+                  textAnchor="middle"
+                  className="text-xs fill-gray-500"
+                >
+                  {displayDate}
+                </text>
+              );
+            });
+          })()}
         </svg>
       </CardContent>
     </Card>

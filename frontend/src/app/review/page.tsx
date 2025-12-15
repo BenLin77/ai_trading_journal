@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button';
 import { formatCurrency, formatDateTime, cn, getPnLColor } from '@/lib/utils';
 import { Loader2, Send, TrendingUp, TrendingDown, BarChart3 } from 'lucide-react';
 import { CandlestickChart } from '@/components/charts/CandlestickChart';
+import { MarkdownRenderer } from '@/components/ui/markdown-renderer';
 
 export default function ReviewPage() {
   const { language } = useAppStore();
@@ -324,13 +325,17 @@ ${tradesInfo}
                           <div
                             key={idx}
                             className={cn(
-                              'p-3 rounded-lg max-w-[85%] whitespace-pre-wrap',
+                              'p-3 rounded-lg max-w-[85%]',
                               msg.role === 'user'
-                                ? 'bg-blue-600 text-white ml-auto'
+                                ? 'bg-blue-600 text-white ml-auto whitespace-pre-wrap'
                                 : 'bg-white dark:bg-gray-700'
                             )}
                           >
-                            {msg.content}
+                            {msg.role === 'user' ? (
+                              msg.content
+                            ) : (
+                              <MarkdownRenderer content={msg.content} />
+                            )}
                           </div>
                         ))
                       )}

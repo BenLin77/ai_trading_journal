@@ -21,6 +21,7 @@ import {
     Plus,
     ChevronRight
 } from 'lucide-react';
+import { MarkdownRenderer } from '@/components/ui/markdown-renderer';
 
 type TabType = 'mfe-mae' | 'plans' | 'notes' | 'ai-review';
 
@@ -30,10 +31,10 @@ export default function JournalPage() {
     const queryClient = useQueryClient();
 
     const tabs = [
-        { id: 'mfe-mae' as TabType, label: language === 'zh' ? '📊 MFE/MAE 分析' : '📊 MFE/MAE Analysis', icon: BarChart3 },
-        { id: 'plans' as TabType, label: language === 'zh' ? '🎯 交易計劃' : '🎯 Trade Plans', icon: Target },
-        { id: 'notes' as TabType, label: language === 'zh' ? '📝 日誌筆記' : '📝 Notes', icon: FileText },
-        { id: 'ai-review' as TabType, label: language === 'zh' ? '🧠 AI 綜合審查' : '🧠 AI Review', icon: Brain },
+        { id: 'mfe-mae' as TabType, label: language === 'zh' ? 'MFE/MAE 分析' : 'MFE/MAE Analysis', icon: BarChart3 },
+        { id: 'plans' as TabType, label: language === 'zh' ? '交易計劃' : 'Trade Plans', icon: Target },
+        { id: 'notes' as TabType, label: language === 'zh' ? '日誌筆記' : 'Notes', icon: FileText },
+        { id: 'ai-review' as TabType, label: language === 'zh' ? 'AI 綜合審查' : 'AI Review', icon: Brain },
     ];
 
     return (
@@ -140,7 +141,7 @@ function MFEMAETab({ language }: { language: string }) {
                 </Button>
             </div>
 
-            {/* 統計卡片 */}
+            {/* 統計卡片 - 整體 */}
             {analysis && (
                 <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
                     <StatCard
@@ -175,8 +176,53 @@ function MFEMAETab({ language }: { language: string }) {
                 </div>
             )}
 
-            {/* MFE/MAE 散點圖 */}
-            {records && records.length > 0 && (
+            {/* MFE/MAE 散點圖 - 分股票和選擇權 */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* 股票圖表 */}
+                {analysis?.stock?.records && analysis.stock.records.length > 0 && (
+                    <Card>
+                        <CardHeader>
+                            <CardTitle className="flex items-center gap-2">
+                                📊 {language === 'zh' ? '股票 MFE/MAE' : 'Stock MFE/MAE'}
+                                <span className="text-sm font-normal text-gray-500">
+                                    ({analysis.stock.stats.total_trades} {language === 'zh' ? '筆' : 'trades'})
+                                </span>
+                            </CardTitle>
+                            <div className="text-xs text-gray-500 grid grid-cols-2 gap-2 mt-2">
+                                <span>Avg MFE: <span className="text-emerald-500">{(analysis.stock.stats.avg_mfe || 0).toFixed(1)}%</span></span>
+                                <span>Avg MAE: <span className="text-red-500">{(analysis.stock.stats.avg_mae || 0).toFixed(1)}%</span></span>
+                            </div>
+                        </CardHeader>
+                        <CardContent>
+                            <MFEMAEChart records={analysis.stock.records} language={language} category="stock" />
+                        </CardContent>
+                    </Card>
+                )}
+
+                {/* 選擇權圖表 */}
+                {analysis?.option?.records && analysis.option.records.length > 0 && (
+                    <Card>
+                        <CardHeader>
+                            <CardTitle className="flex items-center gap-2">
+                                📈 {language === 'zh' ? '選擇權 MFE/MAE' : 'Options MFE/MAE'}
+                                <span className="text-sm font-normal text-gray-500">
+                                    ({analysis.option.stats.total_trades} {language === 'zh' ? '筆' : 'trades'})
+                                </span>
+                            </CardTitle>
+                            <div className="text-xs text-gray-500 grid grid-cols-2 gap-2 mt-2">
+                                <span>Avg MFE: <span className="text-emerald-500">{(analysis.option.stats.avg_mfe || 0).toFixed(1)}%</span></span>
+                                <span>Avg MAE: <span className="text-red-500">{(analysis.option.stats.avg_mae || 0).toFixed(1)}%</span></span>
+                            </div>
+                        </CardHeader>
+                        <CardContent>
+                            <MFEMAEChart records={analysis.option.records} language={language} category="option" />
+                        </CardContent>
+                    </Card>
+                )}
+            </div>
+
+            {/* 沒有分類數據時顯示整體圖表 */}
+            {records && records.length > 0 && (!analysis?.stock?.records?.length && !analysis?.option?.records?.length) && (
                 <Card>
                     <CardHeader>
                         <CardTitle>{language === 'zh' ? '📈 MFE/MAE 分布圖' : '📈 MFE/MAE Distribution'}</CardTitle>
@@ -308,9 +354,7 @@ function MFEMAETab({ language }: { language: string }) {
                         </CardTitle>
                     </CardHeader>
                     <CardContent>
-                        <div className="prose dark:prose-invert max-w-none">
-                            <div className="whitespace-pre-wrap text-sm">{aiAdvice}</div>
-                        </div>
+                        <MarkdownRenderer content={aiAdvice} />
                     </CardContent>
                 </Card>
             )}
@@ -319,7 +363,7 @@ function MFEMAETab({ language }: { language: string }) {
 }
 
 // MFE/MAE 視覺化圖表（類似選擇權損益圖）
-function MFEMAEChart({ records, language }: { records: MFEMAERecord[]; language: string }) {
+function MFEMAEChart({ records, language, category }: { records: MFEMAERecord[]; language: string; category?: 'stock' | 'option' | 'futures' }) {
     // 過濾有效數據
     const validRecords = records.filter(r => r.mfe != null && r.mae != null);
 
@@ -579,9 +623,7 @@ function PlansTab({ language }: { language: string }) {
                         </CardTitle>
                     </CardHeader>
                     <CardContent>
-                        <div className="prose dark:prose-invert max-w-none">
-                            <div className="whitespace-pre-wrap text-sm">{aiReview}</div>
-                        </div>
+                        <MarkdownRenderer content={aiReview} />
                     </CardContent>
                 </Card>
             )}
@@ -924,9 +966,7 @@ function NotesTab({ language }: { language: string }) {
                         </CardTitle>
                     </CardHeader>
                     <CardContent>
-                        <div className="prose dark:prose-invert max-w-none">
-                            <div className="whitespace-pre-wrap text-sm">{aiAnalysis}</div>
-                        </div>
+                        <MarkdownRenderer content={aiAnalysis} />
                     </CardContent>
                 </Card>
             )}
@@ -948,33 +988,47 @@ function NotesTab({ language }: { language: string }) {
 
 function NoteFormModal({
     language,
+    initialData,
     onClose,
     onSuccess
 }: {
     language: string;
+    initialData?: Partial<TradeNote>;
     onClose: () => void;
     onSuccess: () => void;
 }) {
     const [formData, setFormData] = useState({
-        note_type: 'daily' as 'daily' | 'trade' | 'weekly' | 'monthly' | 'misc',
-        date: new Date().toISOString().split('T')[0],
-        symbol: '',
-        title: '',
-        content: '',
-        mood: '',
-        confidence_level: 5,
-        lessons_learned: '',
+        note_type: initialData?.note_type || 'daily',
+        date: initialData?.date || new Date().toISOString().split('T')[0],
+        symbol: initialData?.symbol || '',
+        title: initialData?.title || '',
+        content: initialData?.content || '',
+        mood: initialData?.mood || '',
+        confidence_level: initialData?.confidence_level || 5,
+        lessons_learned: initialData?.lessons_learned || '',
     });
 
     const createMutation = useMutation({
         mutationFn: () => apiClient.createTradeNote({
             ...formData,
+            note_type: formData.note_type as any,
             symbol: formData.symbol || undefined,
             title: formData.title || undefined,
             mood: formData.mood || undefined,
             lessons_learned: formData.lessons_learned || undefined,
         }),
         onSuccess: onSuccess,
+    });
+
+    const aiDraftMutation = useMutation({
+        mutationFn: () => apiClient.getNoteAIDraft({
+            date: formData.date,
+            symbol: formData.symbol,
+            note_type: formData.note_type
+        }),
+        onSuccess: (draft) => {
+            setFormData(prev => ({ ...prev, content: draft }));
+        }
     });
 
     return (
@@ -990,15 +1044,15 @@ function NoteFormModal({
                                 <label className="block text-sm font-medium mb-1">{language === 'zh' ? '類型' : 'Type'}</label>
                                 <select
                                     value={formData.note_type}
-                                    onChange={(e) => setFormData({ ...formData, note_type: e.target.value as typeof formData.note_type })}
+                                    onChange={(e) => setFormData({ ...formData, note_type: e.target.value as any })}
                                     className="w-full px-3 py-2 border rounded-lg dark:bg-gray-800 dark:border-gray-600"
                                 >
-                                    <option value="daily">📅 每日日誌</option>
-                                    <option value="trade">💹 交易筆記</option>
-                                    <option value="mistake">⚠️ 錯誤反省</option>
-                                    <option value="weekly">📊 週回顧</option>
-                                    <option value="monthly">📈 月回顧</option>
-                                    <option value="misc">📝 其他</option>
+                                    <option value="daily">{language === 'zh' ? '每日日誌' : 'Daily Journal'}</option>
+                                    <option value="trade">{language === 'zh' ? '交易筆記' : 'Trade Note'}</option>
+                                    <option value="mistake">{language === 'zh' ? '錯誤反省' : 'Mistake Log'}</option>
+                                    <option value="weekly">{language === 'zh' ? '週回顧' : 'Weekly Review'}</option>
+                                    <option value="monthly">{language === 'zh' ? '月回顧' : 'Monthly Review'}</option>
+                                    <option value="misc">{language === 'zh' ? '其他' : 'Misc'}</option>
                                 </select>
                             </div>
 
@@ -1031,12 +1085,12 @@ function NoteFormModal({
                                     onChange={(e) => setFormData({ ...formData, mood: e.target.value })}
                                     className="w-full px-3 py-2 border rounded-lg dark:bg-gray-800 dark:border-gray-600"
                                 >
-                                    <option value="">-- 選擇 --</option>
-                                    <option value="great">😊 很好</option>
-                                    <option value="good">🙂 好</option>
-                                    <option value="neutral">😐 普通</option>
-                                    <option value="bad">😟 不好</option>
-                                    <option value="terrible">😫 很差</option>
+                                    <option value="">-- {language === 'zh' ? '選擇' : 'Select'} --</option>
+                                    <option value="great">😊 {language === 'zh' ? '很好' : 'Great'}</option>
+                                    <option value="good">🙂 {language === 'zh' ? '好' : 'Good'}</option>
+                                    <option value="neutral">😐 {language === 'zh' ? '普通' : 'Neutral'}</option>
+                                    <option value="bad">😟 {language === 'zh' ? '不好' : 'Bad'}</option>
+                                    <option value="terrible">😫 {language === 'zh' ? '很差' : 'Terrible'}</option>
                                 </select>
                             </div>
                         </div>
@@ -1052,7 +1106,24 @@ function NoteFormModal({
                         </div>
 
                         <div>
-                            <label className="block text-sm font-medium mb-1">{language === 'zh' ? '內容' : 'Content'} *</label>
+                            <div className="flex justify-between items-center mb-1">
+                                <label className="block text-sm font-medium">{language === 'zh' ? '內容' : 'Content'} *</label>
+                                <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => aiDraftMutation.mutate()}
+                                    disabled={aiDraftMutation.isPending}
+                                    className="h-6 text-xs text-purple-500 hover:text-purple-600"
+                                >
+                                    {aiDraftMutation.isPending ? (
+                                        <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                                    ) : (
+                                        <Brain className="h-3 w-3 mr-1" />
+                                    )}
+                                    {language === 'zh' ? 'AI 寫草稿' : 'AI Draft'}
+                                </Button>
+                            </div>
                             <textarea
                                 value={formData.content}
                                 onChange={(e) => setFormData({ ...formData, content: e.target.value })}
@@ -1106,6 +1177,7 @@ function AIReviewTab({ language }: { language: string }) {
     const [review, setReview] = useState<string | null>(null);
     const [dailyReport, setDailyReport] = useState<string | null>(null);
     const [sendStatus, setSendStatus] = useState<{ type: 'success' | 'error' | null; message: string }>({ type: null, message: '' });
+    const [showSaveModal, setShowSaveModal] = useState(false);
 
     const reviewMutation = useMutation({
         mutationFn: apiClient.getComprehensiveAIReview,
@@ -1202,8 +1274,8 @@ function AIReviewTab({ language }: { language: string }) {
                         <CardTitle>{language === 'zh' ? '📋 報告預覽' : '📋 Report Preview'}</CardTitle>
                     </CardHeader>
                     <CardContent>
-                        <div className="prose dark:prose-invert max-w-none bg-gray-50 dark:bg-gray-900 p-4 rounded-lg">
-                            <div className="whitespace-pre-wrap text-sm">{dailyReport}</div>
+                        <div className="bg-gray-50 dark:bg-gray-900 p-4 rounded-lg">
+                            <MarkdownRenderer content={dailyReport} />
                         </div>
                     </CardContent>
                 </Card>
@@ -1211,11 +1283,21 @@ function AIReviewTab({ language }: { language: string }) {
 
             {/* AI 綜合審查 */}
             <Card>
-                <CardHeader>
+                <CardHeader className="flex flex-row items-center justify-between">
                     <CardTitle className="flex items-center gap-2">
                         <Brain className="h-6 w-6 text-purple-500" />
                         {language === 'zh' ? 'AI 綜合審查' : 'AI Comprehensive Review'}
                     </CardTitle>
+                    {review && (
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setShowSaveModal(true)}
+                        >
+                            <FileText className="h-4 w-4 mr-2" />
+                            {language === 'zh' ? '儲存為日誌' : 'Save as Note'}
+                        </Button>
+                    )}
                 </CardHeader>
                 <CardContent>
                     <p className="text-gray-500 mb-4">
@@ -1249,11 +1331,22 @@ function AIReviewTab({ language }: { language: string }) {
                         <CardTitle>{language === 'zh' ? '📋 審查結果' : '📋 Review Results'}</CardTitle>
                     </CardHeader>
                     <CardContent>
-                        <div className="prose dark:prose-invert max-w-none">
-                            <div className="whitespace-pre-wrap">{review}</div>
-                        </div>
+                        <MarkdownRenderer content={review} />
                     </CardContent>
                 </Card>
+            )}
+
+            {showSaveModal && (
+                <NoteFormModal
+                    language={language}
+                    initialData={{
+                        content: review || '',
+                        note_type: 'weekly',
+                        title: `AI Comprehensive Review - ${new Date().toISOString().split('T')[0]}`
+                    }}
+                    onClose={() => setShowSaveModal(false)}
+                    onSuccess={() => setShowSaveModal(false)}
+                />
             )}
         </div>
     );
