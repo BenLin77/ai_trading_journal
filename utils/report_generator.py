@@ -122,9 +122,9 @@ class ReportGenerator:
 請確保數字準確，邏輯自洽。若數據不足以判斷，請誠實說明。
 """
         
-        # 3. 呼叫 AI
+        # 3. 呼叫 AI (使用 Thinking Model 進行深度分析)
         try:
-            response = self.ai_coach.chat(prompt)
+            response = self.ai_coach.analyze(prompt)
             return response
         except Exception as e:
             return f"❌ AI 生成報告失敗: {str(e)}"

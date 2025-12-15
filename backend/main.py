@@ -2544,7 +2544,8 @@ async def get_comprehensive_ai_review():
 
 請用繁體中文回答，使用 Markdown 格式。語氣要專業但友善。"""
 
-        response = coach.chat(prompt)
+        # 使用 Thinking Model 進行深度分析
+        response = coach.analyze(prompt)
         return {"review": response}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -6,29 +6,45 @@ AI 教練整合模組
 2. 生成交易檢討對話
 3. 提供策略建議
 4. 生成績效評語
+
+模型選擇策略：
+- Thinking Model (深度分析): Gemini 2.5 Flash Thinking / DeepSeek Reasoner
+- Fast Model (快速對話): Gemini 2.0 Flash / DeepSeek Chat
 """
 
 import os
+import logging
 from typing import List, Dict, Any, Optional
 from abc import ABC, abstractmethod
+
+logger = logging.getLogger(__name__)
 
 
 class AIProvider(ABC):
     """AI 提供商抽象基類"""
     
     @abstractmethod
-    def generate_content(self, prompt: str) -> str:
-        """生成內容"""
+    def generate_content(self, prompt: str, use_thinking: bool = False) -> str:
+        """生成內容
+        
+        Args:
+            prompt: 提示詞
+            use_thinking: 是否使用思考型模型（用於深度分析）
+        """
         pass
     
     @abstractmethod
     def start_chat(self, history: List[Dict]) -> 'ChatSession':
-        """開始對話"""
+        """開始對話（使用 Fast Model）"""
         pass
 
 
 class DeepSeekProvider(AIProvider):
-    """DeepSeek API 提供商"""
+    """DeepSeek API 提供商 - 支援雙模型"""
+    
+    # 模型配置
+    FAST_MODEL = "deepseek-chat"  # 快速對話
+    THINKING_MODEL = "deepseek-reasoner"  # 深度推理 (R1)
     
     def __init__(self, api_key: str):
         from openai import OpenAI
@@ -36,23 +52,32 @@ class DeepSeekProvider(AIProvider):
             api_key=api_key,
             base_url="https://api.deepseek.com"
         )
-        self.model = "deepseek-chat"
+        logger.info(f"DeepSeek 初始化完成 (Fast: {self.FAST_MODEL}, Thinking: {self.THINKING_MODEL})")
     
-    def generate_content(self, prompt: str) -> str:
+    def generate_content(self, prompt: str, use_thinking: bool = False) -> str:
+        model = self.THINKING_MODEL if use_thinking else self.FAST_MODEL
+        logger.debug(f"使用模型: {model}, thinking={use_thinking}")
+        
         response = self.client.chat.completions.create(
-            model=self.model,
+            model=model,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=4096
+            temperature=0.7 if not use_thinking else 0.0,  # Thinking model 用 0 溫度
+            max_tokens=8192 if use_thinking else 4096
         )
+        
+        # DeepSeek Reasoner 可能有 reasoning_content
+        if use_thinking and hasattr(response.choices[0].message, 'reasoning_content'):
+            reasoning = response.choices[0].message.reasoning_content
+            logger.debug(f"Reasoning 過程: {reasoning[:500]}..." if reasoning else "無 reasoning")
+        
         return response.choices[0].message.content
     
     def start_chat(self, history: List[Dict]) -> 'DeepSeekChatSession':
-        return DeepSeekChatSession(self.client, self.model, history)
+        return DeepSeekChatSession(self.client, self.FAST_MODEL, history)
 
 
 class DeepSeekChatSession:
-    """DeepSeek 聊天會話"""
+    """DeepSeek 聊天會話（使用 Fast Model）"""
     
     def __init__(self, client, model: str, history: List[Dict]):
         self.client = client
@@ -83,35 +108,65 @@ class DeepSeekResponse:
 
 
 class GeminiProvider(AIProvider):
-    """Google Gemini API 提供商"""
+    """Google Gemini API 提供商 - 支援雙模型"""
+    
+    # 模型配置
+    FAST_MODEL = "gemini-2.0-flash"  # 快速對話
+    THINKING_MODEL = "gemini-2.5-flash-preview-05-20"  # 思考型模型 (Gemini 2.5 with thinking)
     
     def __init__(self, api_key: str):
         import google.generativeai as genai
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-2.0-flash')
         self.genai = genai
+        
+        # 初始化兩個模型
+        self.fast_model = genai.GenerativeModel(self.FAST_MODEL)
+        self.thinking_model = genai.GenerativeModel(
+            self.THINKING_MODEL,
+            generation_config=genai.GenerationConfig(
+                thinking_config=genai.ThinkingConfig(thinking_budget=8192)
+            )
+        )
+        logger.info(f"Gemini 初始化完成 (Fast: {self.FAST_MODEL}, Thinking: {self.THINKING_MODEL})")
     
-    def generate_content(self, prompt: str) -> str:
-        response = self.model.generate_content(prompt)
+    def generate_content(self, prompt: str, use_thinking: bool = False) -> str:
+        model = self.thinking_model if use_thinking else self.fast_model
+        logger.debug(f"使用模型: {'Thinking' if use_thinking else 'Fast'}")
+        
+        response = model.generate_content(prompt)
+        
+        # Thinking model 可能有 thoughts
+        if use_thinking and hasattr(response, 'candidates') and response.candidates:
+            for part in response.candidates[0].content.parts:
+                if hasattr(part, 'thought') and part.thought:
+                    logger.debug(f"Thinking 過程: {part.text[:500]}...")
+        
         return response.text
     
     def start_chat(self, history: List[Dict]) -> Any:
-        return self.model.start_chat(history=history)
+        return self.fast_model.start_chat(history=history)
 
 
 class AICoach:
-    """AI 交易教練 - 支援多個 AI 提供商"""
+    """AI 交易教練 - 支援多個 AI 提供商，雙模型架構
+    
+    模型使用策略：
+    - Thinking Model: 每日報告、績效評估、策略建議、錯誤分析
+    - Fast Model: 一般對話、快速回應
+    """
 
-    def __init__(self, api_key: str = None, provider: str = None):
+    def __init__(self, api_key: str = None, provider: str = None, logger: Optional[logging.Logger] = None):
         """
         初始化 AI 教練
 
         Args:
             api_key: API Key（若為 None 則從環境變數讀取）
             provider: 強制使用的提供商 ('deepseek' 或 'gemini')
+            logger: 日誌記錄器
         """
         self.provider: AIProvider = None
         self.provider_name: str = ""
+        self.logger = logger or logging.getLogger(__name__)
         
         # 嘗試初始化 DeepSeek（優先）
         deepseek_key = api_key or os.getenv('DEEPSEEK_API_KEY')
@@ -119,11 +174,12 @@ class AICoach:
             try:
                 self.provider = DeepSeekProvider(deepseek_key)
                 self.provider_name = "DeepSeek"
+                self.logger.info(f"AI Coach 使用 {self.provider_name}")
                 return
             except ImportError:
                 pass  # openai 套件未安裝，嘗試 Gemini
             except Exception as e:
-                print(f"DeepSeek 初始化失敗: {e}")
+                self.logger.warning(f"DeepSeek 初始化失敗: {e}")
         
         # 嘗試初始化 Gemini（備用）
         gemini_key = api_key or os.getenv('GEMINI_API_KEY')
@@ -131,11 +187,12 @@ class AICoach:
             try:
                 self.provider = GeminiProvider(gemini_key)
                 self.provider_name = "Gemini"
+                self.logger.info(f"AI Coach 使用 {self.provider_name}")
                 return
             except ImportError:
                 pass  # google-generativeai 套件未安裝
             except Exception as e:
-                print(f"Gemini 初始化失敗: {e}")
+                self.logger.warning(f"Gemini 初始化失敗: {e}")
         
         # 都失敗了
         raise ValueError(
@@ -268,7 +325,8 @@ class AICoach:
 請用簡潔、具體的語言回答。
 """
 
-        return self.provider.generate_content(prompt)
+        # 策略建議使用 Thinking Model 進行深度分析
+        return self.provider.generate_content(prompt, use_thinking=True)
 
     def generate_performance_review(self, stats: Dict[str, Any], insights: str) -> str:
         """
@@ -303,7 +361,8 @@ class AICoach:
 請用直接、可執行的語言，不要空泛的鼓勵。
 """
 
-        return self.provider.generate_content(prompt)
+        # 績效評估使用 Thinking Model 進行深度分析
+        return self.provider.generate_content(prompt, use_thinking=True)
 
     def summarize_key_takeaway(self, conversation: str) -> str:
         """
@@ -364,7 +423,8 @@ class AICoach:
 **只回傳 JSON 字串，不要有其他文字或 Markdown 標記。**
 """
         try:
-            text = self.provider.generate_content(prompt).strip()
+            # 錯誤分析使用 Thinking Model
+            text = self.provider.generate_content(prompt, use_thinking=True).strip()
             # 清理 markdown 標記
             if text.startswith("```json"):
                 text = text[7:]
@@ -409,7 +469,8 @@ class AICoach:
         """
         
         try:
-            text = self.provider.generate_content(prompt).strip()
+            # 點位分析使用 Thinking Model
+            text = self.provider.generate_content(prompt, use_thinking=True).strip()
             # 移除可能的 markdown 標記
             if text.startswith("```json"):
                 text = text[7:-3]
@@ -471,7 +532,8 @@ class AICoach:
         """
         
         try:
-            text = self.provider.generate_content(prompt).strip()
+            # 批量點位分析使用 Thinking Model
+            text = self.provider.generate_content(prompt, use_thinking=True).strip()
             if text.startswith("```json"):
                 text = text[7:-3]
             elif text.startswith("```"):
@@ -483,7 +545,7 @@ class AICoach:
 
     def chat(self, prompt: str) -> str:
         """
-        通用對話方法
+        通用對話方法 (使用 Fast Model)
         
         Args:
             prompt: 提示詞
@@ -492,6 +554,27 @@ class AICoach:
             AI 回應
         """
         try:
-            return self.provider.generate_content(prompt)
+            return self.provider.generate_content(prompt, use_thinking=False)
+        except Exception as e:
+            return f"AI 對話發生錯誤: {str(e)}"
+
+    def analyze(self, prompt: str) -> str:
+        """
+        深度分析方法 (使用 Thinking Model)
+        
+        適用場景：
+        - 每日報告生成
+        - 綜合審查
+        - 策略建議
+        - 錯誤分析
+        
+        Args:
+            prompt: 提示詞
+            
+        Returns:
+            AI 深度分析結果
+        """
+        try:
+            return self.provider.generate_content(prompt, use_thinking=True)
         except Exception as e:
             return f"AI 分析發生錯誤: {str(e)}"
