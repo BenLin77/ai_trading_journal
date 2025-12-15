@@ -1802,8 +1802,9 @@ async def get_options_advice(request: OptionsAdviceRequest):
 請用繁體中文回答。
 """
         
-        response = ai_coach.model.generate_content(prompt)
-        return {"advice": response.text}
+        # 使用 AICoach 的 analyze 方法進行深度分析
+        response = ai_coach.analyze(prompt)
+        return {"advice": response}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1883,8 +1884,9 @@ async def get_portfolio_ai_analysis(request: PortfolioAnalysisRequest):
 請用繁體中文回答。
 """
         
-        response = ai_coach.model.generate_content(prompt)
-        return {"analysis": response.text}
+        # 使用 AICoach 的 analyze 方法進行深度分析
+        response = ai_coach.analyze(prompt)
+        return {"analysis": response}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
