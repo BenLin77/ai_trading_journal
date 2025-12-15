@@ -920,9 +920,10 @@ async def analyze_portfolio():
 # 初始化 AI Coach (延遲初始化，避免啟動失敗)
 ai_coach = None
 try:
-    ai_coach = _init_ai_coach()
+    ai_coach = get_ai_coach()
 except Exception as e:
     logger.warning(f"AI Coach 初始化警告 (非致命): {e}")
+
 
 # Scheduler 全域變數 (延遲初始化)
 scheduler = None
@@ -971,7 +972,7 @@ async def send_daily_report_job():
         # 確保 AI Coach 已初始化
         global ai_coach
         if ai_coach is None:
-            ai_coach = _init_ai_coach()
+            ai_coach = get_ai_coach()
             
         if ai_coach is None:
             logger.error("AI Coach 未配置，無法生成報告")
