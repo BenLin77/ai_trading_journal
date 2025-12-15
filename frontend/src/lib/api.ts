@@ -420,5 +420,271 @@ export const apiClient = {
     );
     return data.data;
   },
+
+  // ========== MFE/MAE 分析 ==========
+  async getMFEMAEStats() {
+    const { data } = await api.get<{ stats: MFEMAEStats }>('/api/mfe-mae/stats');
+    return data.stats;
+  },
+
+  async getMFEMAERecords(symbol?: string) {
+    const { data } = await api.get<{ records: MFEMAERecord[] }>('/api/mfe-mae/records', {
+      params: symbol ? { symbol } : undefined
+    });
+    return data.records;
+  },
+
+  async calculateMFEMAE(symbol?: string) {
+    const { data } = await api.post<{ success: boolean; calculated_count: number; results: MFEMAERecord[] }>(
+      '/api/mfe-mae/calculate',
+      null,
+      { params: symbol ? { symbol } : undefined }
+    );
+    return data;
+  },
+
+  async getMFEMAEAnalysis() {
+    const { data } = await api.get<{ analysis: MFEMAEAnalysis }>('/api/mfe-mae/analysis');
+    return data.analysis;
+  },
+
+  async getMFEMAEAIAdvice(symbol?: string) {
+    const { data } = await api.post<{ advice: string }>('/api/mfe-mae/ai-advice', null, {
+      params: symbol ? { symbol } : undefined
+    });
+    return data.advice;
+  },
+
+  // ========== 交易計劃 ==========
+  async getTradePlans(status?: string, symbol?: string) {
+    const { data } = await api.get<{ plans: TradePlan[] }>('/api/plans', {
+      params: { status, symbol }
+    });
+    return data.plans;
+  },
+
+  async getTradePlan(planId: number) {
+    const { data } = await api.get<{ plan: TradePlan }>(`/api/plans/${planId}`);
+    return data.plan;
+  },
+
+  async createTradePlan(plan: TradePlanInput) {
+    const { data } = await api.post<{ plan_id: number; message: string }>('/api/plans', plan);
+    return data;
+  },
+
+  async updateTradePlan(planId: number, updates: Partial<TradePlanInput>) {
+    const { data } = await api.put<{ message: string }>(`/api/plans/${planId}`, updates);
+    return data;
+  },
+
+  async deleteTradePlan(planId: number) {
+    const { data } = await api.delete<{ message: string }>(`/api/plans/${planId}`);
+    return data;
+  },
+
+  async getPlanAIReview(planId: number) {
+    const { data } = await api.post<{ review: string }>(`/api/plans/${planId}/ai-review`);
+    return data.review;
+  },
+
+  async getPlanPostAnalysis(planId: number) {
+    const { data } = await api.post<{ analysis: string }>(`/api/plans/${planId}/ai-post-analysis`);
+    return data.analysis;
+  },
+
+  // ========== 交易日誌筆記 ==========
+  async getTradeNotes(params?: { note_type?: string; symbol?: string; start_date?: string; end_date?: string; limit?: number }) {
+    const { data } = await api.get<{ notes: TradeNote[] }>('/api/notes', { params });
+    return data.notes;
+  },
+
+  async getTradeNote(noteId: number) {
+    const { data } = await api.get<{ note: TradeNote }>(`/api/notes/${noteId}`);
+    return data.note;
+  },
+
+  async createTradeNote(note: TradeNoteInput) {
+    const { data } = await api.post<{ note_id: number; message: string }>('/api/notes', note);
+    return data;
+  },
+
+  async updateTradeNote(noteId: number, updates: Partial<TradeNoteInput>) {
+    const { data } = await api.put<{ message: string }>(`/api/notes/${noteId}`, updates);
+    return data;
+  },
+
+  async deleteTradeNote(noteId: number) {
+    const { data } = await api.delete<{ message: string }>(`/api/notes/${noteId}`);
+    return data;
+  },
+
+  async getNoteAIAnalysis(noteId: number) {
+    const { data } = await api.post<{ analysis: string }>(`/api/notes/${noteId}/ai-analyze`);
+    return data.analysis;
+  },
+
+  async getDailySummary(date: string) {
+    const { data } = await api.get<{ summary: DailySummary }>(`/api/notes/daily-summary/${date}`);
+    return data.summary;
+  },
+
+  // ========== AI 綜合審查 ==========
+  async getComprehensiveAIReview() {
+    const { data } = await api.post<{ review: string }>('/api/ai/comprehensive-review');
+    return data.review;
+  },
 };
 
+// ========== 新增的類型定義 ==========
+
+// MFE/MAE 類型
+export interface MFEMAERecord {
+  id?: number;
+  trade_id: string;
+  symbol: string;
+  entry_date: string;
+  exit_date?: string;
+  entry_price: number;
+  exit_price?: number;
+  mfe?: number;  // Max Favorable Excursion (%)
+  mae?: number;  // Max Adverse Excursion (%)
+  mfe_price?: number;
+  mae_price?: number;
+  mfe_date?: string;
+  mae_date?: string;
+  realized_pnl?: number;
+  trade_efficiency?: number;
+  holding_days?: number;
+  max_drawdown_from_peak?: number;
+}
+
+export interface MFEMAEStats {
+  total_trades: number;
+  avg_mfe?: number;
+  avg_mae?: number;
+  avg_efficiency?: number;
+  max_mfe?: number;
+  max_mae?: number;
+  avg_holding_days?: number;
+  efficient_trades?: number;
+  inefficient_trades?: number;
+}
+
+export interface MFEMAEAnalysis {
+  total_trades: number;
+  avg_mfe: number;
+  avg_mae: number;
+  avg_efficiency: number;
+  avg_holding_days: number;
+  efficient_count: number;
+  inefficient_count: number;
+  efficiency_rate: number;
+  large_mae_count: number;
+  missed_mfe_count: number;
+  issues: string[];
+  suggestions: string[];
+}
+
+// 交易計劃類型
+export interface TradePlan {
+  plan_id: number;
+  symbol: string;
+  direction: 'long' | 'short';
+  status: 'pending' | 'executed' | 'cancelled' | 'expired';
+  entry_trigger?: string;
+  entry_price_min?: number;
+  entry_price_max?: number;
+  target_price?: number;
+  stop_loss_price?: number;
+  trailing_stop_pct?: number;
+  position_size?: string;
+  max_risk_amount?: number;
+  risk_reward_ratio?: number;
+  thesis?: string;
+  market_condition?: string;
+  key_levels?: string;
+  valid_until?: string;
+  created_at: string;
+  updated_at: string;
+  linked_trade_id?: string;
+  execution_notes?: string;
+  actual_entry_price?: number;
+  actual_exit_price?: number;
+  plan_vs_actual_diff?: number;
+  ai_review?: string;
+  ai_post_analysis?: string;
+}
+
+export interface TradePlanInput {
+  symbol: string;
+  direction?: 'long' | 'short';
+  entry_trigger?: string;
+  entry_price_min?: number;
+  entry_price_max?: number;
+  target_price?: number;
+  stop_loss_price?: number;
+  trailing_stop_pct?: number;
+  position_size?: string;
+  max_risk_amount?: number;
+  thesis?: string;
+  market_condition?: string;
+  key_levels?: string;
+  valid_until?: string;
+  status?: string;
+  execution_notes?: string;
+  actual_entry_price?: number;
+  actual_exit_price?: number;
+}
+
+// 交易筆記類型
+export interface TradeNote {
+  note_id: number;
+  note_type: 'daily' | 'trade' | 'weekly' | 'monthly' | 'misc';
+  date: string;
+  symbol?: string;
+  trade_id?: string;
+  plan_id?: number;
+  title?: string;
+  content: string;
+  mood?: string;
+  confidence_level?: number;
+  market_sentiment?: string;
+  key_observations?: string[];
+  lessons_learned?: string;
+  action_items?: string[];
+  tags?: string[];
+  category?: string;
+  ai_summary?: string;
+  ai_suggestions?: string;
+  ai_sentiment_score?: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TradeNoteInput {
+  note_type?: 'daily' | 'trade' | 'weekly' | 'monthly' | 'misc';
+  date: string;
+  symbol?: string;
+  trade_id?: string;
+  plan_id?: number;
+  title?: string;
+  content: string;
+  mood?: string;
+  confidence_level?: number;
+  market_sentiment?: string;
+  key_observations?: string[];
+  lessons_learned?: string;
+  action_items?: string[];
+  tags?: string[];
+  category?: string;
+}
+
+export interface DailySummary {
+  date: string;
+  notes: TradeNote[];
+  trades: Trade[];
+  plans: TradePlan[];
+  trade_count: number;
+  total_pnl: number;
+}

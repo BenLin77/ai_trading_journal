@@ -738,17 +738,27 @@ async def get_portfolio():
 @app.post("/api/ibkr/sync", response_model=SyncResponse)
 async def sync_ibkr():
     """同步 IBKR 數據"""
+    # 檢查必要設定
+    token = _get_config('IBKR_FLEX_TOKEN', '')
+    history_qid = _get_config('IBKR_HISTORY_QUERY_ID', '')
+    
+    if not token or not history_qid:
+        raise HTTPException(
+            status_code=400, 
+            detail="IBKR 尚未設定。請到設定頁面設定 Flex Token 和 Query ID。"
+        )
+    
     try:
         flex = IBKRFlexQuery(
-            token=_get_config('IBKR_FLEX_TOKEN', ''),
-            history_query_id=_get_config('IBKR_HISTORY_QUERY_ID', ''),
+            token=token,
+            history_query_id=history_qid,
             positions_query_id=_get_config('IBKR_POSITIONS_QUERY_ID', ''),
         )
         result = flex.sync_to_database(db)
 
         # 同步現金快照（寫入 DB；portfolio 只讀 DB）
         try:
-            cash_data = flex.get_cash_balance(query_id=_get_config('IBKR_HISTORY_QUERY_ID', ''))
+            cash_data = flex.get_cash_balance(query_id=history_qid)
             db.upsert_cash_snapshot(
                 total_cash=float(cash_data.get('total_cash', 0) or 0),
                 total_settled_cash=float(cash_data.get('total_settled_cash', 0) or 0),
@@ -770,6 +780,7 @@ async def sync_ibkr():
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @app.get("/api/ibkr/cash", response_model=CashBalanceResponse)
@@ -1833,7 +1844,633 @@ async def add_mistake_card(request: MistakeCardRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ========== MFE/MAE 分析 ==========
+
+class MFEMAEResponse(BaseModel):
+    trade_id: str
+    symbol: str
+    entry_date: str
+    exit_date: Optional[str] = None
+    entry_price: float
+    exit_price: Optional[float] = None
+    mfe: Optional[float] = None
+    mae: Optional[float] = None
+    mfe_price: Optional[float] = None
+    mae_price: Optional[float] = None
+    trade_efficiency: Optional[float] = None
+    holding_days: Optional[int] = None
+
+
+@app.get("/api/mfe-mae/stats")
+async def get_mfe_mae_stats():
+    """取得 MFE/MAE 統計摘要"""
+    try:
+        # 初始化表格（如果不存在）
+        db.init_mfe_mae_table()
+        stats = db.get_mfe_mae_stats()
+        return {"stats": stats}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/mfe-mae/records")
+async def get_mfe_mae_records(symbol: Optional[str] = None):
+    """取得 MFE/MAE 記錄列表"""
+    try:
+        db.init_mfe_mae_table()
+        records = db.get_mfe_mae_by_symbol(symbol)
+        return {"records": records}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/mfe-mae/calculate")
+async def calculate_mfe_mae(symbol: Optional[str] = None, recalculate: bool = False):
+    """計算所有交易的 MFE/MAE"""
+    try:
+        from utils.mfe_mae_calculator import MFEMAECalculator
+        
+        db.init_mfe_mae_table()
+        calculator = MFEMAECalculator(db)
+        results = calculator.calculate_all_trades(symbol)
+        
+        return {
+            "success": True,
+            "calculated_count": len(results),
+            "results": results[:20]  # 只返回前 20 筆
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/mfe-mae/analysis")
+async def get_mfe_mae_analysis():
+    """取得 MFE/MAE 效率分析報告"""
+    try:
+        from utils.mfe_mae_calculator import MFEMAECalculator
+        
+        db.init_mfe_mae_table()
+        calculator = MFEMAECalculator(db)
+        analysis = calculator.get_efficiency_analysis()
+        
+        return {"analysis": analysis}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/mfe-mae/ai-advice")
+async def get_mfe_mae_ai_advice(symbol: Optional[str] = None):
+    """取得 AI 對 MFE/MAE 的改進建議"""
+    coach = get_ai_coach()
+    if not coach:
+        raise HTTPException(status_code=503, detail="AI 服務未設定")
+    
+    try:
+        from utils.mfe_mae_calculator import MFEMAECalculator
+        
+        db.init_mfe_mae_table()
+        calculator = MFEMAECalculator(db)
+        context = calculator.generate_ai_context(symbol)
+        
+        prompt = f"""你是一位專業的交易教練，請根據以下 MFE/MAE 分析數據，提供具體的改進建議：
+
+{context}
+
+請回答：
+1. **執行品質評估**：根據 MFE/MAE 數據，評估交易執行的整體品質
+2. **主要問題**：識別最大的 2-3 個問題
+3. **具體改進建議**：針對每個問題給出可執行的改進方案
+4. **出場策略優化**：根據數據建議更好的出場策略（例如移動停利、分批出場等）
+5. **風險控制**：基於 MAE 數據，建議停損策略的調整
+
+請用繁體中文回答，使用 Markdown 格式。"""
+
+        response = coach.chat(prompt)
+        return {"advice": response}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========== 交易計劃 ==========
+
+class TradePlanRequest(BaseModel):
+    symbol: str
+    direction: str = 'long'  # 'long' or 'short'
+    entry_trigger: Optional[str] = None
+    entry_price_min: Optional[float] = None
+    entry_price_max: Optional[float] = None
+    target_price: Optional[float] = None
+    stop_loss_price: Optional[float] = None
+    trailing_stop_pct: Optional[float] = None
+    position_size: Optional[str] = None
+    max_risk_amount: Optional[float] = None
+    thesis: Optional[str] = None
+    market_condition: Optional[str] = None
+    key_levels: Optional[str] = None
+    valid_until: Optional[str] = None
+
+
+class TradePlanUpdateRequest(BaseModel):
+    status: Optional[str] = None
+    execution_notes: Optional[str] = None
+    actual_entry_price: Optional[float] = None
+    actual_exit_price: Optional[float] = None
+    ai_review: Optional[str] = None
+    ai_post_analysis: Optional[str] = None
+
+
+@app.get("/api/plans")
+async def get_trade_plans(status: Optional[str] = None, symbol: Optional[str] = None):
+    """取得交易計劃列表"""
+    try:
+        db.init_trade_plans_table()
+        plans = db.get_trade_plans(status=status, symbol=symbol)
+        return {"plans": plans}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/plans/{plan_id}")
+async def get_trade_plan(plan_id: int):
+    """取得單一交易計劃"""
+    try:
+        db.init_trade_plans_table()
+        plan = db.get_trade_plan(plan_id)
+        if not plan:
+            raise HTTPException(status_code=404, detail="Plan not found")
+        return {"plan": plan}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/plans")
+async def create_trade_plan(request: TradePlanRequest):
+    """新增交易計劃"""
+    try:
+        db.init_trade_plans_table()
+        plan_id = db.add_trade_plan(request.model_dump())
+        return {"plan_id": plan_id, "message": "Trade plan created"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/plans/{plan_id}")
+async def update_trade_plan(plan_id: int, request: TradePlanUpdateRequest):
+    """更新交易計劃"""
+    try:
+        db.init_trade_plans_table()
+        data = {k: v for k, v in request.model_dump().items() if v is not None}
+        success = db.update_trade_plan(plan_id, data)
+        if not success:
+            raise HTTPException(status_code=404, detail="Plan not found")
+        return {"message": "Plan updated"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/plans/{plan_id}")
+async def delete_trade_plan(plan_id: int):
+    """刪除交易計劃"""
+    try:
+        db.init_trade_plans_table()
+        success = db.delete_trade_plan(plan_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Plan not found")
+        return {"message": "Plan deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/plans/{plan_id}/link-trade")
+async def link_plan_to_trade(plan_id: int, trade_id: str, actual_entry: float, actual_exit: Optional[float] = None):
+    """將交易計劃連結到實際交易"""
+    try:
+        db.init_trade_plans_table()
+        success = db.link_plan_to_trade(plan_id, trade_id, actual_entry, actual_exit)
+        if not success:
+            raise HTTPException(status_code=404, detail="Plan not found")
+        return {"message": "Plan linked to trade"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/plans/{plan_id}/ai-review")
+async def get_plan_ai_review(plan_id: int):
+    """取得 AI 對交易計劃的評價"""
+    coach = get_ai_coach()
+    if not coach:
+        raise HTTPException(status_code=503, detail="AI 服務未設定")
+    
+    try:
+        db.init_trade_plans_table()
+        plan = db.get_trade_plan(plan_id)
+        if not plan:
+            raise HTTPException(status_code=404, detail="Plan not found")
+        
+        # 取得市場報價
+        current_price = None
+        try:
+            import yfinance as yf
+            ticker = yf.Ticker(plan['symbol'])
+            hist = ticker.history(period="1d")
+            if len(hist) > 0:
+                current_price = float(hist['Close'].iloc[-1])
+        except Exception:
+            pass
+        
+        prompt = f"""你是一位專業的交易計劃審核者，請評估以下交易計劃：
+
+## 交易計劃詳情
+- **標的**: {plan['symbol']}
+- **方向**: {plan['direction']}
+- **進場觸發條件**: {plan.get('entry_trigger') or '未設定'}
+- **進場價格區間**: ${plan.get('entry_price_min') or 'N/A'} - ${plan.get('entry_price_max') or 'N/A'}
+- **目標價**: ${plan.get('target_price') or 'N/A'}
+- **停損價**: ${plan.get('stop_loss_price') or 'N/A'}
+- **風險報酬比**: {plan.get('risk_reward_ratio') or 'N/A'}
+- **部位大小**: {plan.get('position_size') or '未設定'}
+- **最大風險金額**: ${plan.get('max_risk_amount') or 'N/A'}
+
+### 交易論點
+{plan.get('thesis') or '未提供'}
+
+### 市場環境
+{plan.get('market_condition') or '未提供'}
+
+### 當前市價
+${current_price or 'N/A'}
+
+請提供：
+1. **計劃評分** (1-10 分)：整體計劃的完整性和可行性
+2. **優點**：這個計劃做得好的地方
+3. **風險提醒**：可能被忽略的風險
+4. **改進建議**：如何讓這個計劃更完善
+5. **執行建議**：進入交易時應注意什麼
+
+請用繁體中文回答，使用 Markdown 格式。"""
+
+        response = coach.chat(prompt)
+        
+        # 儲存 AI 評價
+        db.update_trade_plan(plan_id, {'ai_review': response})
+        
+        return {"review": response}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/plans/{plan_id}/ai-post-analysis")
+async def get_plan_post_analysis(plan_id: int):
+    """取得 AI 對已執行計劃的事後分析"""
+    coach = get_ai_coach()
+    if not coach:
+        raise HTTPException(status_code=503, detail="AI 服務未設定")
+    
+    try:
+        db.init_trade_plans_table()
+        plan = db.get_trade_plan(plan_id)
+        if not plan:
+            raise HTTPException(status_code=404, detail="Plan not found")
+        
+        if plan['status'] != 'executed':
+            raise HTTPException(status_code=400, detail="Plan not executed yet")
+        
+        prompt = f"""你是一位專業的交易教練，請對比這筆交易的「計劃」與「實際執行」，進行事後分析：
+
+## 計劃 vs 實際
+- **標的**: {plan['symbol']}
+- **計劃進場價**: ${plan.get('entry_price_min') or plan.get('entry_price_max') or 'N/A'}
+- **實際進場價**: ${plan.get('actual_entry_price') or 'N/A'}
+- **價格偏差**: {plan.get('plan_vs_actual_diff') or 'N/A'}%
+- **計劃目標價**: ${plan.get('target_price') or 'N/A'}
+- **計劃停損價**: ${plan.get('stop_loss_price') or 'N/A'}
+- **實際出場價**: ${plan.get('actual_exit_price') or '尚未出場'}
+
+### 原始交易論點
+{plan.get('thesis') or '未提供'}
+
+### 執行備註
+{plan.get('execution_notes') or '未提供'}
+
+請分析：
+1. **計劃遵循度**：是否按照計劃執行？偏差原因是什麼？
+2. **進場時機評估**：進場時機是否正確？
+3. **出場時機評估**：（如果已出場）是否按計劃出場？
+4. **可以改進的地方**：下次遇到類似情況應該怎麼做？
+5. **關鍵教訓**：從這筆交易學到什麼？
+
+請用繁體中文回答，使用 Markdown 格式。"""
+
+        response = coach.chat(prompt)
+        
+        # 儲存事後分析
+        db.update_trade_plan(plan_id, {'ai_post_analysis': response})
+        
+        return {"analysis": response}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========== 交易日誌筆記 ==========
+
+class TradeNoteRequest(BaseModel):
+    note_type: str = 'misc'  # 'daily', 'trade', 'weekly', 'monthly', 'misc'
+    date: str
+    symbol: Optional[str] = None
+    trade_id: Optional[str] = None
+    plan_id: Optional[int] = None
+    title: Optional[str] = None
+    content: str
+    mood: Optional[str] = None
+    confidence_level: Optional[int] = None
+    market_sentiment: Optional[str] = None
+    key_observations: Optional[List[str]] = None
+    lessons_learned: Optional[str] = None
+    action_items: Optional[List[str]] = None
+    tags: Optional[List[str]] = None
+    category: Optional[str] = None
+
+
+class TradeNoteUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+    mood: Optional[str] = None
+    confidence_level: Optional[int] = None
+    key_observations: Optional[List[str]] = None
+    lessons_learned: Optional[str] = None
+    action_items: Optional[List[str]] = None
+    tags: Optional[List[str]] = None
+
+
+@app.get("/api/notes")
+async def get_trade_notes(
+    note_type: Optional[str] = None,
+    symbol: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 100
+):
+    """取得交易日誌筆記列表"""
+    try:
+        db.init_trade_notes_table()
+        notes = db.get_trade_notes(
+            note_type=note_type,
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            limit=limit
+        )
+        return {"notes": notes}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/notes/{note_id}")
+async def get_trade_note(note_id: int):
+    """取得單一交易日誌筆記"""
+    try:
+        db.init_trade_notes_table()
+        note = db.get_trade_note(note_id)
+        if not note:
+            raise HTTPException(status_code=404, detail="Note not found")
+        return {"note": note}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/notes")
+async def create_trade_note(request: TradeNoteRequest):
+    """新增交易日誌筆記"""
+    try:
+        db.init_trade_notes_table()
+        note_id = db.add_trade_note(request.model_dump())
+        return {"note_id": note_id, "message": "Note created"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/notes/{note_id}")
+async def update_trade_note(note_id: int, request: TradeNoteUpdateRequest):
+    """更新交易日誌筆記"""
+    try:
+        db.init_trade_notes_table()
+        data = {k: v for k, v in request.model_dump().items() if v is not None}
+        success = db.update_trade_note(note_id, data)
+        if not success:
+            raise HTTPException(status_code=404, detail="Note not found")
+        return {"message": "Note updated"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/notes/{note_id}")
+async def delete_trade_note(note_id: int):
+    """刪除交易日誌筆記"""
+    try:
+        db.init_trade_notes_table()
+        success = db.delete_trade_note(note_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Note not found")
+        return {"message": "Note deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/notes/daily-summary/{date}")
+async def get_daily_summary(date: str):
+    """取得某日的完整摘要"""
+    try:
+        db.init_trade_notes_table()
+        db.init_trade_plans_table()
+        summary = db.get_daily_summary(date)
+        return {"summary": summary}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/notes/{note_id}/ai-analyze")
+async def analyze_note_with_ai(note_id: int):
+    """AI 分析筆記並給出建議"""
+    coach = get_ai_coach()
+    if not coach:
+        raise HTTPException(status_code=503, detail="AI 服務未設定")
+    
+    try:
+        db.init_trade_notes_table()
+        note = db.get_trade_note(note_id)
+        if not note:
+            raise HTTPException(status_code=404, detail="Note not found")
+        
+        # 取得相關交易數據
+        related_context = ""
+        if note.get('symbol'):
+            trades = db.get_trades()
+            symbol_trades = [t for t in trades if t['symbol'] == note['symbol']]
+            if symbol_trades:
+                total_pnl = sum(t.get('realized_pnl', 0) for t in symbol_trades)
+                related_context = f"\n相關標的 {note['symbol']} 總盈虧: ${total_pnl:,.2f}"
+        
+        prompt = f"""你是一位專業的交易教練，請分析以下交易日誌並給出建議：
+
+## 日誌資訊
+- **類型**: {note['note_type']}
+- **日期**: {note['date']}
+- **標的**: {note.get('symbol') or 'N/A'}
+- **標題**: {note.get('title') or 'N/A'}
+- **情緒狀態**: {note.get('mood') or 'N/A'}
+- **信心水平**: {note.get('confidence_level') or 'N/A'}/10
+- **市場情緒**: {note.get('market_sentiment') or 'N/A'}
+
+### 內容
+{note['content']}
+
+### 重要觀察
+{note.get('key_observations') or 'N/A'}
+
+### 學到的教訓
+{note.get('lessons_learned') or 'N/A'}
+{related_context}
+
+請提供：
+1. **情緒分析**：從這篇日誌中識別交易者的心理狀態
+2. **行為模式**：是否有需要注意的交易行為模式？
+3. **改進建議**：基於這篇日誌，給出 2-3 個具體可行的改進建議
+4. **正向肯定**：這篇日誌中做得好的地方
+5. **後續行動**：建議接下來應該做什麼
+
+請用繁體中文回答，使用 Markdown 格式。保持鼓勵但誠實的語氣。"""
+
+        response = coach.chat(prompt)
+        
+        # 更新筆記的 AI 建議
+        db.update_trade_note(note_id, {
+            'ai_summary': response[:500] if len(response) > 500 else response,
+            'ai_suggestions': response
+        })
+        
+        return {"analysis": response}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ai/comprehensive-review")
+async def get_comprehensive_ai_review():
+    """
+    AI 綜合審查：整合 MFE/MAE、交易計劃、日誌筆記進行全面分析
+    """
+    coach = get_ai_coach()
+    if not coach:
+        raise HTTPException(status_code=503, detail="AI 服務未設定")
+    
+    try:
+        from utils.mfe_mae_calculator import MFEMAECalculator
+        
+        # 初始化表格
+        db.init_mfe_mae_table()
+        db.init_trade_plans_table()
+        db.init_trade_notes_table()
+        
+        # 收集所有數據
+        mfe_context = ""
+        try:
+            calculator = MFEMAECalculator(db)
+            mfe_context = calculator.generate_ai_context()
+        except Exception:
+            mfe_context = "MFE/MAE 數據暫無"
+        
+        # 交易計劃統計
+        all_plans = db.get_trade_plans()
+        pending_plans = [p for p in all_plans if p.get('status') == 'pending']
+        executed_plans = [p for p in all_plans if p.get('status') == 'executed']
+        
+        plans_context = f"""## 交易計劃統計
+- 總計劃數: {len(all_plans)}
+- 待執行: {len(pending_plans)}
+- 已執行: {len(executed_plans)}
+"""
+        if executed_plans:
+            avg_diff = sum(p.get('plan_vs_actual_diff', 0) or 0 for p in executed_plans) / len(executed_plans)
+            plans_context += f"- 平均計劃偏差: {avg_diff:.1f}%\n"
+        
+        # 最近筆記
+        recent_notes = db.get_trade_notes(limit=5)
+        notes_context = "\n## 最近日誌摘要\n"
+        for note in recent_notes:
+            notes_context += f"- [{note['date']}] {note.get('title') or note['content'][:50]}...\n"
+            if note.get('mood'):
+                notes_context += f"  情緒: {note['mood']}\n"
+        
+        # 交易統計
+        stats = db.get_trade_statistics()
+        stats_context = f"""## 交易績效
+- 總交易: {stats.get('total_trades', 0)} 筆
+- 勝率: {stats.get('win_rate', 0):.1f}%
+- 獲利因子: {stats.get('profit_factor', 0):.2f}
+- 總盈虧: ${stats.get('total_pnl', 0):,.2f}
+"""
+        
+        prompt = f"""你是一位資深的交易教練，請根據以下數據對交易者進行全面評估：
+
+{mfe_context}
+
+{plans_context}
+
+{notes_context}
+
+{stats_context}
+
+請提供全面的分析報告，包含：
+
+## 1. 整體表現評估
+評估交易者在以下維度的表現（每項 1-10 分）：
+- 執行紀律
+- 風險管理
+- 情緒控制
+- 計劃遵循度
+- 獲利能力
+
+## 2. 主要問題識別
+列出最需要改進的 3 個問題
+
+## 3. 具體改進建議
+針對每個問題給出可執行的改進步驟
+
+## 4. 本週/本月行動計劃
+建議接下來應該專注的 2-3 個重點
+
+## 5. 正向鼓勵
+肯定做得好的地方，保持動力
+
+請用繁體中文回答，使用 Markdown 格式。語氣要專業但友善。"""
+
+        response = coach.chat(prompt)
+        return {"review": response}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ========== 市場數據 ==========
+
 
 @app.get("/api/market/quote/{symbol}")
 async def get_market_quote(symbol: str):

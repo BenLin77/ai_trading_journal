@@ -1208,3 +1208,616 @@ class TradingDatabase:
         rows = cursor.fetchall()
         conn.close()
         return [dict(row) for row in rows]
+
+    # ========== MFE/MAE 分析表 ==========
+
+    def init_mfe_mae_table(self):
+        """初始化 MFE/MAE 分析表"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trade_mfe_mae (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id TEXT NOT NULL UNIQUE,
+                symbol TEXT NOT NULL,
+                entry_date TEXT NOT NULL,
+                exit_date TEXT,
+                entry_price REAL NOT NULL,
+                exit_price REAL,
+                mfe REAL,                    -- Max Favorable Excursion (最大浮盈 %)
+                mae REAL,                    -- Max Adverse Excursion (最大浮虧 %)
+                mfe_price REAL,              -- MFE 時的價格
+                mae_price REAL,              -- MAE 時的價格
+                mfe_date TEXT,               -- MFE 發生日期
+                mae_date TEXT,               -- MAE 發生日期
+                realized_pnl REAL,           -- 實際盈虧
+                trade_efficiency REAL,       -- 交易效率 = realized_pnl / MFE
+                holding_days INTEGER,        -- 持倉天數
+                max_drawdown_from_peak REAL, -- 從最高點回撤
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_mfe_mae_symbol
+            ON trade_mfe_mae(symbol)
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_mfe_mae_entry_date
+            ON trade_mfe_mae(entry_date)
+        """)
+
+        conn.commit()
+        conn.close()
+
+    def upsert_mfe_mae(self, data: Dict[str, Any]) -> int:
+        """新增或更新 MFE/MAE 分析記錄"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            INSERT INTO trade_mfe_mae
+            (trade_id, symbol, entry_date, exit_date, entry_price, exit_price,
+             mfe, mae, mfe_price, mae_price, mfe_date, mae_date,
+             realized_pnl, trade_efficiency, holding_days, max_drawdown_from_peak, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(trade_id) DO UPDATE SET
+                exit_date = excluded.exit_date,
+                exit_price = excluded.exit_price,
+                mfe = excluded.mfe,
+                mae = excluded.mae,
+                mfe_price = excluded.mfe_price,
+                mae_price = excluded.mae_price,
+                mfe_date = excluded.mfe_date,
+                mae_date = excluded.mae_date,
+                realized_pnl = excluded.realized_pnl,
+                trade_efficiency = excluded.trade_efficiency,
+                holding_days = excluded.holding_days,
+                max_drawdown_from_peak = excluded.max_drawdown_from_peak,
+                updated_at = datetime('now')
+        """, (
+            data['trade_id'],
+            data['symbol'],
+            data['entry_date'],
+            data.get('exit_date'),
+            data['entry_price'],
+            data.get('exit_price'),
+            data.get('mfe'),
+            data.get('mae'),
+            data.get('mfe_price'),
+            data.get('mae_price'),
+            data.get('mfe_date'),
+            data.get('mae_date'),
+            data.get('realized_pnl'),
+            data.get('trade_efficiency'),
+            data.get('holding_days'),
+            data.get('max_drawdown_from_peak')
+        ))
+
+        record_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return record_id
+
+    def get_mfe_mae_by_symbol(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """取得 MFE/MAE 分析記錄"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        if symbol:
+            cursor.execute("""
+                SELECT * FROM trade_mfe_mae
+                WHERE symbol = ?
+                ORDER BY entry_date DESC
+            """, (symbol,))
+        else:
+            cursor.execute("""
+                SELECT * FROM trade_mfe_mae
+                ORDER BY entry_date DESC
+            """)
+
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
+    def get_mfe_mae_stats(self) -> Dict[str, Any]:
+        """取得 MFE/MAE 統計摘要"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT
+                COUNT(*) as total_trades,
+                AVG(mfe) as avg_mfe,
+                AVG(mae) as avg_mae,
+                AVG(trade_efficiency) as avg_efficiency,
+                MAX(mfe) as max_mfe,
+                MIN(mae) as max_mae,
+                AVG(holding_days) as avg_holding_days,
+                SUM(CASE WHEN trade_efficiency > 0.5 THEN 1 ELSE 0 END) as efficient_trades,
+                SUM(CASE WHEN trade_efficiency <= 0.5 THEN 1 ELSE 0 END) as inefficient_trades
+            FROM trade_mfe_mae
+            WHERE mfe IS NOT NULL AND mae IS NOT NULL
+        """)
+
+        row = cursor.fetchone()
+        conn.close()
+
+        if row:
+            return dict(row)
+        return {}
+
+    # ========== 交易計劃表 ==========
+
+    def init_trade_plans_table(self):
+        """初始化交易計劃表"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trade_plans (
+                plan_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                direction TEXT NOT NULL,          -- 'long' / 'short'
+                status TEXT DEFAULT 'pending',    -- 'pending', 'executed', 'cancelled', 'expired'
+                
+                -- 進場條件
+                entry_trigger TEXT,               -- 觸發條件描述
+                entry_price_min REAL,             -- 進場價格區間下限
+                entry_price_max REAL,             -- 進場價格區間上限
+                
+                -- 出場條件
+                target_price REAL,                -- 目標價
+                stop_loss_price REAL,             -- 停損價
+                trailing_stop_pct REAL,           -- 移動停損百分比
+                
+                -- 部位管理
+                position_size TEXT,               -- 預計部位大小
+                max_risk_amount REAL,             -- 最大風險金額
+                risk_reward_ratio REAL,           -- 風險報酬比
+                
+                -- 交易論點
+                thesis TEXT,                      -- 交易論點/理由
+                market_condition TEXT,            -- 市場環境描述
+                key_levels TEXT,                  -- 重要價位 JSON
+                
+                -- 時間相關
+                valid_until TEXT,                 -- 計劃有效期
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                
+                -- 執行相關
+                linked_trade_id TEXT,             -- 關聯到實際交易
+                execution_notes TEXT,             -- 執行備註
+                actual_entry_price REAL,          -- 實際進場價
+                actual_exit_price REAL,           -- 實際出場價
+                plan_vs_actual_diff REAL,         -- 計劃與實際差異
+                
+                -- AI 分析
+                ai_review TEXT,                   -- AI 對計劃的評價
+                ai_post_analysis TEXT             -- AI 執行後分析
+            )
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_plans_symbol
+            ON trade_plans(symbol)
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_plans_status
+            ON trade_plans(status)
+        """)
+
+        conn.commit()
+        conn.close()
+
+    def add_trade_plan(self, data: Dict[str, Any]) -> int:
+        """新增交易計劃"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        # 計算風險報酬比
+        risk_reward = None
+        if data.get('entry_price_min') and data.get('target_price') and data.get('stop_loss_price'):
+            entry = data['entry_price_min']
+            target = data['target_price']
+            stop = data['stop_loss_price']
+            if data.get('direction') == 'long':
+                reward = target - entry
+                risk = entry - stop
+            else:
+                reward = entry - target
+                risk = stop - entry
+            if risk > 0:
+                risk_reward = round(reward / risk, 2)
+
+        cursor.execute("""
+            INSERT INTO trade_plans
+            (symbol, direction, status, entry_trigger, entry_price_min, entry_price_max,
+             target_price, stop_loss_price, trailing_stop_pct, position_size, max_risk_amount,
+             risk_reward_ratio, thesis, market_condition, key_levels, valid_until)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            data['symbol'],
+            data.get('direction', 'long'),
+            data.get('status', 'pending'),
+            data.get('entry_trigger'),
+            data.get('entry_price_min'),
+            data.get('entry_price_max'),
+            data.get('target_price'),
+            data.get('stop_loss_price'),
+            data.get('trailing_stop_pct'),
+            data.get('position_size'),
+            data.get('max_risk_amount'),
+            risk_reward,
+            data.get('thesis'),
+            data.get('market_condition'),
+            data.get('key_levels'),
+            data.get('valid_until')
+        ))
+
+        plan_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return plan_id
+
+    def update_trade_plan(self, plan_id: int, data: Dict[str, Any]) -> bool:
+        """更新交易計劃"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        # 動態構建 UPDATE 語句
+        allowed_fields = [
+            'symbol', 'direction', 'status', 'entry_trigger', 'entry_price_min',
+            'entry_price_max', 'target_price', 'stop_loss_price', 'trailing_stop_pct',
+            'position_size', 'max_risk_amount', 'risk_reward_ratio', 'thesis',
+            'market_condition', 'key_levels', 'valid_until', 'linked_trade_id',
+            'execution_notes', 'actual_entry_price', 'actual_exit_price',
+            'plan_vs_actual_diff', 'ai_review', 'ai_post_analysis'
+        ]
+
+        updates = []
+        params = []
+        for field in allowed_fields:
+            if field in data:
+                updates.append(f"{field} = ?")
+                params.append(data[field])
+
+        if not updates:
+            conn.close()
+            return False
+
+        updates.append("updated_at = datetime('now')")
+        params.append(plan_id)
+
+        query = f"UPDATE trade_plans SET {', '.join(updates)} WHERE plan_id = ?"
+        cursor.execute(query, params)
+
+        success = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return success
+
+    def get_trade_plans(self, status: Optional[str] = None, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """取得交易計劃列表"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        query = "SELECT * FROM trade_plans WHERE 1=1"
+        params = []
+
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+
+        if symbol:
+            query += " AND symbol = ?"
+            params.append(symbol)
+
+        query += " ORDER BY created_at DESC"
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
+    def get_trade_plan(self, plan_id: int) -> Optional[Dict[str, Any]]:
+        """取得單一交易計劃"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM trade_plans WHERE plan_id = ?", (plan_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def link_plan_to_trade(self, plan_id: int, trade_id: str, actual_entry: float, actual_exit: float = None) -> bool:
+        """將交易計劃連結到實際交易"""
+        plan = self.get_trade_plan(plan_id)
+        if not plan:
+            return False
+
+        # 計算計劃與實際的差異
+        planned_entry = plan.get('entry_price_min') or plan.get('entry_price_max')
+        diff = None
+        if planned_entry and actual_entry:
+            diff = round(((actual_entry - planned_entry) / planned_entry) * 100, 2)
+
+        return self.update_trade_plan(plan_id, {
+            'status': 'executed',
+            'linked_trade_id': trade_id,
+            'actual_entry_price': actual_entry,
+            'actual_exit_price': actual_exit,
+            'plan_vs_actual_diff': diff
+        })
+
+    def delete_trade_plan(self, plan_id: int) -> bool:
+        """刪除交易計劃"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM trade_plans WHERE plan_id = ?", (plan_id,))
+        success = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return success
+
+    # ========== 交易日誌筆記表 ==========
+
+    def init_trade_notes_table(self):
+        """初始化交易日誌筆記表"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trade_notes (
+                note_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                note_type TEXT NOT NULL,          -- 'daily', 'trade', 'weekly', 'monthly', 'misc'
+                date TEXT NOT NULL,               -- 關聯日期
+                symbol TEXT,                      -- 關聯標的 (可選)
+                trade_id TEXT,                    -- 關聯交易 ID (可選)
+                plan_id INTEGER,                  -- 關聯交易計劃 (可選)
+                
+                -- 主要內容
+                title TEXT,                       -- 標題
+                content TEXT NOT NULL,            -- 主要內容 (Markdown)
+                
+                -- 結構化數據
+                mood TEXT,                        -- 情緒狀態
+                confidence_level INTEGER,         -- 信心水平 1-10
+                market_sentiment TEXT,            -- 市場情緒
+                key_observations TEXT,            -- 重要觀察 (JSON array)
+                lessons_learned TEXT,             -- 學到的教訓
+                action_items TEXT,                -- 待辦事項 (JSON array)
+                
+                -- 標籤和分類
+                tags TEXT,                        -- 標籤 (JSON array)
+                category TEXT,                    -- 分類
+                
+                -- AI 相關
+                ai_summary TEXT,                  -- AI 自動摘要
+                ai_suggestions TEXT,              -- AI 改進建議
+                ai_sentiment_score REAL,          -- AI 情緒評分 -1 to 1
+                
+                -- 時間戳記
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                
+                FOREIGN KEY (trade_id) REFERENCES trades(trade_id),
+                FOREIGN KEY (plan_id) REFERENCES trade_plans(plan_id)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_notes_date
+            ON trade_notes(date)
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_notes_type
+            ON trade_notes(note_type)
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_notes_symbol
+            ON trade_notes(symbol)
+        """)
+
+        conn.commit()
+        conn.close()
+
+    def add_trade_note(self, data: Dict[str, Any]) -> int:
+        """新增交易日誌筆記"""
+        import json
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        # 處理 JSON 欄位
+        key_observations = data.get('key_observations')
+        if isinstance(key_observations, list):
+            key_observations = json.dumps(key_observations, ensure_ascii=False)
+
+        action_items = data.get('action_items')
+        if isinstance(action_items, list):
+            action_items = json.dumps(action_items, ensure_ascii=False)
+
+        tags = data.get('tags')
+        if isinstance(tags, list):
+            tags = json.dumps(tags, ensure_ascii=False)
+
+        cursor.execute("""
+            INSERT INTO trade_notes
+            (note_type, date, symbol, trade_id, plan_id, title, content,
+             mood, confidence_level, market_sentiment, key_observations,
+             lessons_learned, action_items, tags, category)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            data.get('note_type', 'misc'),
+            data['date'],
+            data.get('symbol'),
+            data.get('trade_id'),
+            data.get('plan_id'),
+            data.get('title'),
+            data['content'],
+            data.get('mood'),
+            data.get('confidence_level'),
+            data.get('market_sentiment'),
+            key_observations,
+            data.get('lessons_learned'),
+            action_items,
+            tags,
+            data.get('category')
+        ))
+
+        note_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return note_id
+
+    def update_trade_note(self, note_id: int, data: Dict[str, Any]) -> bool:
+        """更新交易日誌筆記"""
+        import json
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        allowed_fields = [
+            'note_type', 'date', 'symbol', 'trade_id', 'plan_id', 'title', 'content',
+            'mood', 'confidence_level', 'market_sentiment', 'key_observations',
+            'lessons_learned', 'action_items', 'tags', 'category',
+            'ai_summary', 'ai_suggestions', 'ai_sentiment_score'
+        ]
+
+        updates = []
+        params = []
+        for field in allowed_fields:
+            if field in data:
+                value = data[field]
+                # 處理 JSON 欄位
+                if field in ['key_observations', 'action_items', 'tags'] and isinstance(value, list):
+                    value = json.dumps(value, ensure_ascii=False)
+                updates.append(f"{field} = ?")
+                params.append(value)
+
+        if not updates:
+            conn.close()
+            return False
+
+        updates.append("updated_at = datetime('now')")
+        params.append(note_id)
+
+        query = f"UPDATE trade_notes SET {', '.join(updates)} WHERE note_id = ?"
+        cursor.execute(query, params)
+
+        success = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return success
+
+    def get_trade_notes(self, 
+                        note_type: Optional[str] = None,
+                        symbol: Optional[str] = None,
+                        start_date: Optional[str] = None,
+                        end_date: Optional[str] = None,
+                        limit: int = 100) -> List[Dict[str, Any]]:
+        """取得交易日誌筆記列表"""
+        import json
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        query = "SELECT * FROM trade_notes WHERE 1=1"
+        params = []
+
+        if note_type:
+            query += " AND note_type = ?"
+            params.append(note_type)
+
+        if symbol:
+            query += " AND symbol = ?"
+            params.append(symbol)
+
+        if start_date:
+            query += " AND date >= ?"
+            params.append(start_date)
+
+        if end_date:
+            query += " AND date <= ?"
+            params.append(end_date)
+
+        query += " ORDER BY date DESC, created_at DESC LIMIT ?"
+        params.append(limit)
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        conn.close()
+
+        # 解析 JSON 欄位
+        result = []
+        for row in rows:
+            note = dict(row)
+            for field in ['key_observations', 'action_items', 'tags']:
+                if note.get(field):
+                    try:
+                        note[field] = json.loads(note[field])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+            result.append(note)
+
+        return result
+
+    def get_trade_note(self, note_id: int) -> Optional[Dict[str, Any]]:
+        """取得單一交易日誌筆記"""
+        import json
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM trade_notes WHERE note_id = ?", (note_id,))
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row:
+            return None
+
+        note = dict(row)
+        for field in ['key_observations', 'action_items', 'tags']:
+            if note.get(field):
+                try:
+                    note[field] = json.loads(note[field])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        return note
+
+    def delete_trade_note(self, note_id: int) -> bool:
+        """刪除交易日誌筆記"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM trade_notes WHERE note_id = ?", (note_id,))
+        success = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
+        return success
+
+    def get_daily_summary(self, date: str) -> Dict[str, Any]:
+        """取得某日的完整摘要（筆記 + 交易 + 計劃）"""
+        notes = self.get_trade_notes(start_date=date, end_date=date)
+        
+        # 取得當日交易
+        trades = self.get_trades(start_date=date, end_date=date)
+        
+        # 取得相關計劃
+        plans = self.get_trade_plans()
+        daily_plans = [p for p in plans if p.get('created_at', '').startswith(date)]
+
+        return {
+            'date': date,
+            'notes': notes,
+            'trades': trades,
+            'plans': daily_plans,
+            'trade_count': len(trades),
+            'total_pnl': sum(t.get('realized_pnl', 0) for t in trades)
+        }

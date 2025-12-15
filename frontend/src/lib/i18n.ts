@@ -10,6 +10,7 @@ export const translations = {
   // Navigation
   nav_dashboard: { zh: '儀表板', en: 'Dashboard' },
   nav_review: { zh: '交易檢討', en: 'Trade Review' },
+  nav_journal: { zh: '交易日誌', en: 'Journal' },
   nav_strategy: { zh: '策略模擬', en: 'Strategy' },
   nav_report: { zh: '績效成績單', en: 'Report Card' },
   nav_lab: { zh: '策略回測', en: 'Strategy Lab' },

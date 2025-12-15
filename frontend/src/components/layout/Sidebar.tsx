@@ -16,11 +16,13 @@ import {
   AlertCircle,
   Settings,
   ChevronLeft,
+  BookOpen,
 } from 'lucide-react';
 
 const navItems = [
   { href: '/', icon: LayoutDashboard, labelKey: 'nav_dashboard' as const },
   { href: '/review', icon: FileSearch, labelKey: 'nav_review' as const },
+  { href: '/journal', icon: BookOpen, labelKey: 'nav_journal' as const },
   { href: '/strategy', icon: Target, labelKey: 'nav_strategy' as const },
   { href: '/report', icon: FileBarChart, labelKey: 'nav_report' as const },
   { href: '/lab', icon: FlaskConical, labelKey: 'nav_lab' as const },
