@@ -590,6 +590,15 @@ async def get_portfolio():
     total_market_value = 0
     total_unrealized = 0
     
+    # 先計算總市值（用於相對風險評估）
+    for underlying, data in grouped_positions.items():
+        stock_value = data['stock_value']
+        options_value = sum(
+            o.get('mark_price', 0) * o.get('net_quantity', 0) * float(o.get('multiplier', 100) or 100)
+            for o in data['options']
+        )
+        total_market_value += stock_value + options_value
+    
     for underlying, data in grouped_positions.items():
         # 使用新的策略識別模組
         from utils.option_strategies import OptionLeg as StrategyOptionLeg, StockPosition as StrategyStockPosition
@@ -640,7 +649,7 @@ async def get_portfolio():
         )
         options_unrealized = sum(o.get('unrealized_pnl', 0) for o in options)
         
-        total_market_value += stock_value + options_value
+        # total_market_value 已在上面預計算
         total_unrealized += stock_unrealized + options_unrealized
         
         # 轉換選擇權腿
@@ -698,13 +707,33 @@ async def get_portfolio():
             total_vega += 0.1 * abs(opt_qty) * multiplier
             total_theta += -0.05 * abs(opt_qty) * multiplier  # Theta 通常是負的
         
-        # 計算風險等級（基於 Delta 暴露）
+        # 計算風險等級（多維度評估）
         market_value_for_risk = stock_value if stock_value > 0 else abs(total_delta * data['stock_price'])
         delta_exposure = abs(total_delta * data['stock_price']) if data['stock_price'] > 0 else 0
         
-        if delta_exposure > 50000:
+        # 計算相對風險（Delta Exposure 佔總市值的比例）
+        total_portfolio_value = total_market_value if total_market_value > 0 else 1
+        relative_exposure = delta_exposure / total_portfolio_value
+        
+        # 計算市值佔比（集中度風險）
+        position_concentration = (stock_value + options_value) / total_portfolio_value if total_portfolio_value > 0 else 0
+        
+        # 風險評估：綜合考慮多個因素
+        # 1. Delta 暴露（絕對值）：$5,000 = 中，$15,000 = 高
+        # 2. Delta 暴露（相對值）：10% = 中，25% = 高
+        # 3. 市值佔比（集中度）：20% = 中，35% = 高
+        # 4. 虧損幅度：>15% = 中，>30% = 高
+        
+        is_high_loss = abs(unrealized_pnl_pct) > 30
+        is_medium_loss = abs(unrealized_pnl_pct) > 15
+        is_high_concentration = position_concentration > 0.35
+        is_medium_concentration = position_concentration > 0.20
+        
+        if (delta_exposure > 15000 or relative_exposure > 0.25 or 
+            is_high_concentration or is_high_loss):
             risk_level = "高"
-        elif delta_exposure > 20000:
+        elif (delta_exposure > 5000 or relative_exposure > 0.10 or 
+              is_medium_concentration or is_medium_loss):
             risk_level = "中"
         else:
             risk_level = "低"
@@ -2011,6 +2040,83 @@ async def get_mfe_mae_analysis():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/mfe-mae/running")
+async def get_running_mfe_mae():
+    """取得未平倉倉位的即時 MFE/MAE（類似 TradesViz 的 Running MFE/MAE）"""
+    try:
+        from utils.mfe_mae_calculator import MFEMAECalculator
+        from utils.derivatives_support import InstrumentParser
+        import yfinance as yf
+        from datetime import datetime, timedelta
+        
+        positions = db.get_latest_positions()
+        if not positions:
+            return {"positions": []}
+        
+        parser = InstrumentParser()
+        results = []
+        
+        for pos in positions:
+            symbol = pos.get('symbol', '')
+            qty = pos.get('position', pos.get('quantity', 0))
+            avg_cost = pos.get('avgCost', pos.get('average_cost', 0))
+            
+            if qty == 0 or avg_cost <= 0:
+                continue
+            
+            parsed = parser.parse_symbol(symbol)
+            underlying = parsed.get('underlying', symbol)
+            instrument_type = parsed.get('instrument_type', 'stock')
+            
+            # 只計算股票的 running MFE/MAE
+            if instrument_type != 'stock':
+                continue
+            
+            try:
+                # 獲取最近 60 天的 OHLC
+                ticker = yf.Ticker(underlying)
+                hist = ticker.history(period='60d')
+                
+                if hist.empty:
+                    continue
+                
+                current_price = hist['Close'].iloc[-1]
+                high_since_entry = hist['High'].max()
+                low_since_entry = hist['Low'].min()
+                
+                # 計算 running MFE/MAE
+                if qty > 0:  # Long
+                    running_mfe = ((high_since_entry - avg_cost) / avg_cost) * 100
+                    running_mae = ((low_since_entry - avg_cost) / avg_cost) * 100
+                    current_pnl = ((current_price - avg_cost) / avg_cost) * 100
+                else:  # Short
+                    running_mfe = ((avg_cost - low_since_entry) / avg_cost) * 100
+                    running_mae = ((avg_cost - high_since_entry) / avg_cost) * 100
+                    current_pnl = ((avg_cost - current_price) / avg_cost) * 100
+                
+                # 計算從峰值回撤
+                drawdown_from_peak = running_mfe - current_pnl if running_mfe > 0 else 0
+                
+                results.append({
+                    'symbol': underlying,
+                    'quantity': float(qty),
+                    'avg_cost': float(avg_cost),
+                    'current_price': float(current_price),
+                    'current_pnl': round(current_pnl, 2),
+                    'running_mfe': round(running_mfe, 2),
+                    'running_mae': round(running_mae, 2),
+                    'drawdown_from_peak': round(drawdown_from_peak, 2),
+                    'efficiency': round(current_pnl / running_mfe, 3) if running_mfe > 0 else 0,
+                })
+            except Exception as e:
+                logger.warning(f"Failed to calculate running MFE/MAE for {underlying}: {e}")
+                continue
+        
+        return {"positions": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/mfe-mae/ai-advice")
 async def get_mfe_mae_ai_advice(symbol: Optional[str] = None):
     """取得 AI 對 MFE/MAE 的改進建議"""
@@ -2202,6 +2308,84 @@ async def delete_trade_plan(plan_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class AIGeneratePlanRequest(BaseModel):
+    symbol: str
+    direction: str = 'long'  # 'long' or 'short'
+
+
+@app.post("/api/plans/ai-generate")
+async def generate_ai_trade_plan(request: AIGeneratePlanRequest):
+    """
+    AI 自動生成交易計劃
+    根據當前倉位和 K 線圖數據，生成具體的進出場建議
+    """
+    coach = get_ai_coach()
+    if not coach:
+        raise HTTPException(status_code=503, detail="AI 服務未設定")
+    
+    try:
+        from utils.ai_context_builder import AIContextBuilder
+        
+        context_builder = AIContextBuilder(db)
+        
+        # 取得標的上下文
+        symbol_context = context_builder.build_symbol_context(
+            symbol=request.symbol,
+            include_positions=True,
+            include_chart=True,
+            lookback_days=30
+        )
+        
+        prompt = f"""你是一位專業的交易策略師。請根據以下數據為 {request.symbol} 生成一個完整的交易計劃。
+
+{symbol_context}
+
+**交易方向**: {request.direction}
+
+請生成以下格式的 JSON 回應（只輸出 JSON，不要其他文字）：
+```json
+{{
+    "symbol": "{request.symbol}",
+    "direction": "{request.direction}",
+    "entry_trigger": "進場觸發條件描述",
+    "entry_price_min": 數字,
+    "entry_price_max": 數字,
+    "target_price": 數字,
+    "stop_loss_price": 數字,
+    "position_size": "建議部位大小（如：總資金的 5%）",
+    "thesis": "交易論點和理由",
+    "market_condition": "當前市場環境描述"
+}}
+```
+
+生成建議時請考慮：
+1. 進場價位應在合理的支撐/阻力區間
+2. 停損應基於 ATR 設定（建議 1.5-2 倍 ATR）
+3. 目標價應有合理的風險報酬比（至少 2:1）
+4. 考慮當前趨勢和倉位情況"""
+
+        response = coach.chat(prompt)
+        
+        # 解析 JSON
+        import json
+        import re
+        
+        # 嘗試從回應中提取 JSON
+        json_match = re.search(r'\{[\s\S]*\}', response)
+        if json_match:
+            try:
+                plan_data = json.loads(json_match.group())
+                return {"plan": plan_data, "raw_response": response}
+            except json.JSONDecodeError:
+                pass
+        
+        # 如果無法解析，返回原始回應
+        return {"plan": None, "raw_response": response}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/plans/{plan_id}/link-trade")
 async def link_plan_to_trade(plan_id: int, trade_id: str, actual_entry: float, actual_exit: Optional[float] = None):
     """將交易計劃連結到實際交易"""
@@ -2219,7 +2403,7 @@ async def link_plan_to_trade(plan_id: int, trade_id: str, actual_entry: float, a
 
 @app.post("/api/plans/{plan_id}/ai-review")
 async def get_plan_ai_review(plan_id: int):
-    """取得 AI 對交易計劃的評價"""
+    """取得 AI 對交易計劃的評價（包含倉位和 K 線圖上下文）"""
     coach = get_ai_coach()
     if not coach:
         raise HTTPException(status_code=503, detail="AI 服務未設定")
@@ -2230,18 +2414,20 @@ async def get_plan_ai_review(plan_id: int):
         if not plan:
             raise HTTPException(status_code=404, detail="Plan not found")
         
-        # 取得市場報價
-        current_price = None
-        try:
-            import yfinance as yf
-            ticker = yf.Ticker(plan['symbol'])
-            hist = ticker.history(period="1d")
-            if len(hist) > 0:
-                current_price = float(hist['Close'].iloc[-1])
-        except Exception:
-            pass
+        # 使用 AIContextBuilder 建構完整上下文
+        from utils.ai_context_builder import AIContextBuilder
+        context_builder = AIContextBuilder(db)
         
-        prompt = f"""你是一位專業的交易計劃審核者，請評估以下交易計劃：
+        # 取得標的相關上下文（倉位 + K 線圖）
+        symbol_context = context_builder.build_symbol_context(
+            symbol=plan['symbol'],
+            include_positions=True,
+            include_chart=True,
+            include_gamma=False,  # 未來啟用
+            lookback_days=30
+        )
+        
+        prompt = f"""你是一位專業的交易計劃審核者，請評估以下交易計劃。
 
 ## 交易計劃詳情
 - **標的**: {plan['symbol']}
@@ -2260,15 +2446,18 @@ async def get_plan_ai_review(plan_id: int):
 ### 市場環境
 {plan.get('market_condition') or '未提供'}
 
-### 當前市價
-${current_price or 'N/A'}
+{symbol_context}
 
 請提供：
 1. **計劃評分** (1-10 分)：整體計劃的完整性和可行性
-2. **優點**：這個計劃做得好的地方
-3. **風險提醒**：可能被忽略的風險
-4. **改進建議**：如何讓這個計劃更完善
-5. **執行建議**：進入交易時應注意什麼
+2. **與現有倉位的關係**：這個計劃如何影響你的整體風險暴露？是加碼、新建還是避險？
+3. **進場時機評估**：根據 K 線圖數據，當前價位是否適合進場？
+4. **具體價位建議**：
+   - 建議進場價位（根據支撐阻力）
+   - 建議停損價位（根據 ATR）
+   - 建議目標價位（根據阻力位）
+5. **風險提醒**：可能被忽略的風險
+6. **執行建議**：進入交易時應注意什麼
 
 請用繁體中文回答，使用 Markdown 格式。"""
 
@@ -2418,6 +2607,137 @@ async def create_trade_note(request: TradeNoteRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class AIGenerateNoteRequest(BaseModel):
+    note_type: str = 'daily'  # 'daily', 'trade', 'weekly', 'monthly', 'misc'
+    date: str
+    symbol: Optional[str] = None
+
+
+@app.post("/api/notes/ai-generate")
+async def generate_ai_trade_note(request: AIGenerateNoteRequest):
+    """
+    AI 自動生成日誌筆記
+    根據當前倉位、K 線圖和最近交易生成完整的日誌內容
+    """
+    coach = get_ai_coach()
+    if not coach:
+        raise HTTPException(status_code=503, detail="AI 服務未設定")
+    
+    try:
+        from utils.ai_context_builder import AIContextBuilder
+        from datetime import datetime
+        
+        context_builder = AIContextBuilder(db)
+        
+        # 投資組合上下文
+        portfolio_context = context_builder.get_portfolio_summary()
+        
+        # 如果有指定標的，取得該標的的 K 線圖
+        symbol_context = ""
+        if request.symbol:
+            symbol_context = context_builder.build_symbol_context(
+                symbol=request.symbol,
+                include_positions=True,
+                include_chart=True,
+                lookback_days=14
+            )
+        
+        # 取得當天相關交易
+        trades = db.get_trades()
+        today_trades = [t for t in trades if t.get('datetime', '').startswith(request.date)]
+        
+        trades_context = ""
+        if today_trades:
+            trades_context = f"\n## 今日交易記錄\n"
+            total_pnl = 0
+            for t in today_trades:
+                pnl = t.get('realized_pnl', 0) or 0
+                total_pnl += pnl
+                trades_context += f"- {t['symbol']}: {t['action']} {t['quantity']} @ ${t['price']:.2f}"
+                if pnl != 0:
+                    trades_context += f" (盈虧: ${pnl:+,.2f})"
+                trades_context += "\n"
+            trades_context += f"\n**今日總盈虧**: ${total_pnl:+,.2f}\n"
+        
+        # 根據筆記類型生成不同內容
+        if request.note_type == 'daily':
+            note_prompt = "每日交易日誌"
+            content_guide = """包含：
+1. 今日市場觀察
+2. 交易回顧（如果有交易）
+3. 執行紀律評估
+4. 情緒狀態
+5. 明日計劃"""
+        elif request.note_type == 'trade':
+            note_prompt = f"交易記錄筆記（{request.symbol or '標的'}）"
+            content_guide = """包含：
+1. 交易動機
+2. 進出場執行評估
+3. 學到的教訓
+4. 下次可以改進的地方"""
+        elif request.note_type == 'weekly':
+            note_prompt = "週回顧"
+            content_guide = """包含：
+1. 本週績效總結
+2. 最佳/最差交易
+3. 執行紀律評分
+4. 下週重點"""
+        else:
+            note_prompt = "交易筆記"
+            content_guide = "包含重要觀察和學習心得"
+        
+        prompt = f"""你是一位交易員的 AI 助手，請幫忙撰寫一份 {note_prompt}。
+
+日期: {request.date}
+標的: {request.symbol or '不限'}
+
+{portfolio_context}
+
+{symbol_context}
+
+{trades_context}
+
+請生成以下格式的 JSON 回應（只輸出 JSON，不要其他文字）：
+```json
+{{
+    "title": "筆記標題",
+    "content": "完整內容（使用 Markdown 格式，{content_guide}）",
+    "mood": "情緒狀態（如：confident/cautious/frustrated/calm/excited）",
+    "confidence_level": 數字(1-10),
+    "market_sentiment": "市場情緒描述",
+    "key_observations": ["觀察1", "觀察2"],
+    "lessons_learned": "今日學到的教訓",
+    "action_items": ["待辦1", "待辦2"]
+}}
+```
+
+請用第一人稱撰寫，語氣專業但人性化，可適度使用 emoji。"""
+
+        response = coach.chat(prompt)
+        
+        # 解析 JSON
+        import json
+        import re
+        
+        json_match = re.search(r'\{[\s\S]*\}', response)
+        if json_match:
+            try:
+                note_data = json.loads(json_match.group())
+                # 添加日期和類型
+                note_data['date'] = request.date
+                note_data['note_type'] = request.note_type
+                if request.symbol:
+                    note_data['symbol'] = request.symbol
+                return {"note": note_data, "raw_response": response}
+            except json.JSONDecodeError:
+                pass
+        
+        return {"note": None, "raw_response": response}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.put("/api/notes/{note_id}")
 async def update_trade_note(note_id: int, request: TradeNoteUpdateRequest):
     """更新交易日誌筆記"""
@@ -2531,7 +2851,7 @@ async def analyze_note_with_ai(note_id: int):
 @app.post("/api/ai/comprehensive-review")
 async def get_comprehensive_ai_review():
     """
-    AI 綜合審查：整合 MFE/MAE、交易計劃、日誌筆記進行全面分析
+    AI 綜合審查：整合 MFE/MAE、交易計劃、日誌筆記、當前倉位和 K 線圖進行全面分析
     """
     coach = get_ai_coach()
     if not coach:
@@ -2539,19 +2859,54 @@ async def get_comprehensive_ai_review():
     
     try:
         from utils.mfe_mae_calculator import MFEMAECalculator
+        from utils.ai_context_builder import AIContextBuilder
         
         # 初始化表格
         db.init_mfe_mae_table()
         db.init_trade_plans_table()
         db.init_trade_notes_table()
         
-        # 收集所有數據
+        # 建構 AI 上下文
+        context_builder = AIContextBuilder(db)
+        
+        # 收集 MFE/MAE 數據
         mfe_context = ""
         try:
             calculator = MFEMAECalculator(db)
             mfe_context = calculator.generate_ai_context()
         except Exception:
             mfe_context = "MFE/MAE 數據暫無"
+        
+        # 投資組合上下文（倉位）
+        portfolio_context = context_builder.get_portfolio_summary()
+        
+        # 主要持倉的 K 線圖分析
+        positions = db.get_latest_positions()
+        chart_contexts = []
+        if positions:
+            from utils.derivatives_support import InstrumentParser
+            parser = InstrumentParser()
+            
+            # 取得不重複的 underlying
+            underlyings = set()
+            for pos in positions:
+                parsed = parser.parse_symbol(pos.get('symbol', ''))
+                underlying = parsed.get('underlying', pos.get('symbol', ''))
+                if underlying:
+                    underlyings.add(underlying.upper())
+            
+            # 只取前 3 個主要持倉的 K 線圖
+            for symbol in list(underlyings)[:3]:
+                chart_ctx = context_builder.build_symbol_context(
+                    symbol=symbol,
+                    include_positions=False,  # 已經有 portfolio_context
+                    include_chart=True,
+                    lookback_days=30
+                )
+                if chart_ctx:
+                    chart_contexts.append(chart_ctx)
+        
+        chart_context = "\n\n".join(chart_contexts) if chart_contexts else ""
         
         # 交易計劃統計
         all_plans = db.get_trade_plans()
@@ -2563,6 +2918,11 @@ async def get_comprehensive_ai_review():
 - 待執行: {len(pending_plans)}
 - 已執行: {len(executed_plans)}
 """
+        if pending_plans:
+            plans_context += "\n### 待執行計劃\n"
+            for p in pending_plans[:3]:
+                plans_context += f"- {p['symbol']} ({p['direction']}): 進場 ${p.get('entry_price_min') or 'N/A'}-${p.get('entry_price_max') or 'N/A'}\n"
+        
         if executed_plans:
             avg_diff = sum(p.get('plan_vs_actual_diff', 0) or 0 for p in executed_plans) / len(executed_plans)
             plans_context += f"- 平均計劃偏差: {avg_diff:.1f}%\n"
@@ -2584,7 +2944,11 @@ async def get_comprehensive_ai_review():
 - 總盈虧: ${stats.get('total_pnl', 0):,.2f}
 """
         
-        prompt = f"""你是一位資深的交易教練，請根據以下數據對交易者進行全面評估：
+        prompt = f"""你是一位資深的交易教練，請根據以下數據對交易者進行全面評估。
+
+{portfolio_context}
+
+{chart_context}
 
 {mfe_context}
 
@@ -2596,7 +2960,13 @@ async def get_comprehensive_ai_review():
 
 請提供全面的分析報告，包含：
 
-## 1. 整體表現評估
+## 1. 當前倉位風險評估
+根據 K 線圖和倉位數據：
+- 目前市場趨勢判斷
+- 各持倉的風險暴露程度
+- 是否有需要立即調整的倉位？
+
+## 2. 整體表現評估
 評估交易者在以下維度的表現（每項 1-10 分）：
 - 執行紀律
 - 風險管理
@@ -2604,16 +2974,19 @@ async def get_comprehensive_ai_review():
 - 計劃遵循度
 - 獲利能力
 
-## 2. 主要問題識別
+## 3. 主要問題識別
 列出最需要改進的 3 個問題
 
-## 3. 具體改進建議
-針對每個問題給出可執行的改進步驟
+## 4. 具體操作建議
+針對當前持倉，給出具體的操作建議：
+- 哪些可以加碼？
+- 哪些應該減碼？
+- 停損點位建議
 
-## 4. 本週/本月行動計劃
+## 5. 本週/本月行動計劃
 建議接下來應該專注的 2-3 個重點
 
-## 5. 正向鼓勵
+## 6. 正向鼓勵
 肯定做得好的地方，保持動力
 
 請用繁體中文回答，使用 Markdown 格式。語氣要專業但友善。"""

@@ -1221,6 +1221,8 @@ class TradingDatabase:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 trade_id TEXT NOT NULL UNIQUE,
                 symbol TEXT NOT NULL,
+                original_symbol TEXT,        -- 原始交易代號（如選擇權完整代號）
+                instrument_type TEXT DEFAULT 'stock',  -- 'stock' 或 'option'
                 entry_date TEXT NOT NULL,
                 exit_date TEXT,
                 entry_price REAL NOT NULL,
@@ -1250,6 +1252,17 @@ class TradingDatabase:
             ON trade_mfe_mae(entry_date)
         """)
 
+        # 資料庫遷移：新增缺少的欄位（相容舊版本）
+        try:
+            cursor.execute("ALTER TABLE trade_mfe_mae ADD COLUMN original_symbol TEXT")
+        except Exception:
+            pass  # 欄位已存在
+
+        try:
+            cursor.execute("ALTER TABLE trade_mfe_mae ADD COLUMN instrument_type TEXT DEFAULT 'stock'")
+        except Exception:
+            pass  # 欄位已存在
+
         conn.commit()
         conn.close()
 
@@ -1260,11 +1273,13 @@ class TradingDatabase:
 
         cursor.execute("""
             INSERT INTO trade_mfe_mae
-            (trade_id, symbol, entry_date, exit_date, entry_price, exit_price,
+            (trade_id, symbol, original_symbol, instrument_type, entry_date, exit_date, entry_price, exit_price,
              mfe, mae, mfe_price, mae_price, mfe_date, mae_date,
              realized_pnl, trade_efficiency, holding_days, max_drawdown_from_peak, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
             ON CONFLICT(trade_id) DO UPDATE SET
+                original_symbol = excluded.original_symbol,
+                instrument_type = excluded.instrument_type,
                 exit_date = excluded.exit_date,
                 exit_price = excluded.exit_price,
                 mfe = excluded.mfe,
@@ -1281,6 +1296,8 @@ class TradingDatabase:
         """, (
             data['trade_id'],
             data['symbol'],
+            data.get('original_symbol'),
+            data.get('instrument_type', 'stock'),
             data['entry_date'],
             data.get('exit_date'),
             data['entry_price'],

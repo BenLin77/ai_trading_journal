@@ -455,6 +455,11 @@ export const apiClient = {
     return data.advice;
   },
 
+  async getRunningMFEMAE() {
+    const { data } = await api.get<{ positions: RunningMFEMAEPosition[] }>('/api/mfe-mae/running');
+    return data.positions;
+  },
+
   // ========== 交易計劃 ==========
   async getTradePlans(status?: string, symbol?: string) {
     const { data } = await api.get<{ plans: TradePlan[] }>('/api/plans', {
@@ -493,7 +498,20 @@ export const apiClient = {
     return data.analysis;
   },
 
+  async generateAITradePlan(symbol: string, direction: 'long' | 'short' = 'long') {
+    const { data } = await api.post<{ plan: TradePlanInput | null; raw_response: string }>('/api/plans/ai-generate', {
+      symbol,
+      direction
+    });
+    return data;
+  },
+
   // ========== 交易日誌筆記 ==========
+  async generateAINote(params: { note_type: string; date: string; symbol?: string }) {
+    const { data } = await api.post<{ note: TradeNoteInput | null; raw_response: string }>('/api/notes/ai-generate', params);
+    return data;
+  },
+
   async getNoteAIDraft(params: { date: string; symbol?: string; note_type?: string }) {
     const { data } = await api.post<{ draft: string }>('/api/notes/ai-draft', params);
     return data.draft;
@@ -605,17 +623,12 @@ export interface MFEMAEAnalysis {
   missed_mfe_count: number;
   issues: string[];
   suggestions: string[];
-  // 分類數據（股票 vs 槓桿商品：選擇權、期貨）
+  // 分類數據（股票 vs 衍生性商品：選擇權、期貨）
   stock?: {
     records: MFEMAERecord[];
     stats: MFEMAECategoryStats;
   };
-  option?: {
-    records: MFEMAERecord[];
-    stats: MFEMAECategoryStats;
-  };
-  // 未來擴展：期貨
-  futures?: {
+  derivatives?: {
     records: MFEMAERecord[];
     stats: MFEMAECategoryStats;
   };
@@ -631,6 +644,19 @@ export interface MFEMAECategoryStats {
   efficient_count: number;
   inefficient_count: number;
   efficiency_rate: number;
+}
+
+// Running MFE/MAE（未平倉倉位的即時 MFE/MAE）
+export interface RunningMFEMAEPosition {
+  symbol: string;
+  quantity: number;
+  avg_cost: number;
+  current_price: number;
+  current_pnl: number;
+  running_mfe: number;
+  running_mae: number;
+  drawdown_from_peak: number;
+  efficiency: number;
 }
 
 // 交易計劃類型

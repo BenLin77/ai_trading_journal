@@ -78,6 +78,7 @@ export default function JournalPage() {
 function MFEMAETab({ language }: { language: string }) {
     const queryClient = useQueryClient();
     const [aiAdvice, setAiAdvice] = useState<string | null>(null);
+    const [selectedTrade, setSelectedTrade] = useState<MFEMAERecord | null>(null);
 
     const { data: analysis, isLoading: analysisLoading } = useQuery({
         queryKey: ['mfe-mae-analysis'],
@@ -199,36 +200,70 @@ function MFEMAETab({ language }: { language: string }) {
                     </Card>
                 )}
 
-                {/* 選擇權圖表 */}
-                {analysis?.option?.records && analysis.option.records.length > 0 && (
+                {/* 衍生性商品圖表 */}
+                {analysis?.derivatives?.records && analysis.derivatives.records.length > 0 && (
                     <Card>
                         <CardHeader>
                             <CardTitle className="flex items-center gap-2">
-                                📈 {language === 'zh' ? '選擇權 MFE/MAE' : 'Options MFE/MAE'}
+                                📈 {language === 'zh' ? '衍生性商品 MFE/MAE' : 'Derivatives MFE/MAE'}
                                 <span className="text-sm font-normal text-gray-500">
-                                    ({analysis.option.stats.total_trades} {language === 'zh' ? '筆' : 'trades'})
+                                    ({analysis.derivatives.stats.total_trades} {language === 'zh' ? '筆' : 'trades'})
                                 </span>
                             </CardTitle>
                             <div className="text-xs text-gray-500 grid grid-cols-2 gap-2 mt-2">
-                                <span>Avg MFE: <span className="text-emerald-500">{(analysis.option.stats.avg_mfe || 0).toFixed(1)}%</span></span>
-                                <span>Avg MAE: <span className="text-red-500">{(analysis.option.stats.avg_mae || 0).toFixed(1)}%</span></span>
+                                <span>Avg MFE: <span className="text-emerald-500">{(analysis.derivatives.stats.avg_mfe || 0).toFixed(1)}%</span></span>
+                                <span>Avg MAE: <span className="text-red-500">{(analysis.derivatives.stats.avg_mae || 0).toFixed(1)}%</span></span>
                             </div>
                         </CardHeader>
                         <CardContent>
-                            <MFEMAEChart records={analysis.option.records} language={language} category="option" />
+                            <MFEMAEChart records={analysis.derivatives.records} language={language} category="option" />
                         </CardContent>
                     </Card>
                 )}
             </div>
 
             {/* 沒有分類數據時顯示整體圖表 */}
-            {records && records.length > 0 && (!analysis?.stock?.records?.length && !analysis?.option?.records?.length) && (
+            {records && records.length > 0 && (!analysis?.stock?.records?.length && !analysis?.derivatives?.records?.length) && (
                 <Card>
                     <CardHeader>
                         <CardTitle>{language === 'zh' ? '📈 MFE/MAE 分布圖' : '📈 MFE/MAE Distribution'}</CardTitle>
                     </CardHeader>
                     <CardContent>
                         <MFEMAEChart records={records} language={language} />
+                    </CardContent>
+                </Card>
+            )}
+
+            {/* MFE/MAE 象限分析圖 */}
+            {records && records.length > 0 && (
+                <Card>
+                    <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                            🎯 {language === 'zh' ? 'MFE/MAE 象限分析' : 'MFE/MAE Quadrant Analysis'}
+                            <span className="text-sm font-normal text-gray-500">({records.length} {language === 'zh' ? '筆' : 'trades'})</span>
+                        </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                        <MFEMAEScatterPlot records={records} language={language} onSelect={setSelectedTrade} />
+                        {selectedTrade && (
+                            <div className="mt-4 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
+                                <div className="flex justify-between items-start">
+                                    <div>
+                                        <span className="font-bold text-lg">{selectedTrade.symbol}</span>
+                                        {(selectedTrade as any).instrument_type === 'combo' && <span className="ml-2 px-2 py-0.5 text-xs bg-purple-100 text-purple-600 rounded">🔗 組合</span>}
+                                        {(selectedTrade as any).instrument_type === 'option' && <span className="ml-2 px-2 py-0.5 text-xs bg-blue-100 text-blue-600 rounded">📊 選擇權</span>}
+                                    </div>
+                                    <button onClick={() => setSelectedTrade(null)} className="text-gray-400 hover:text-gray-600">✕</button>
+                                </div>
+                                <div className="text-sm text-gray-500 mt-1">{selectedTrade.entry_date} → {selectedTrade.exit_date}</div>
+                                <div className="grid grid-cols-4 gap-4 mt-3">
+                                    <div><span className="text-gray-500">MFE:</span> <span className="text-emerald-500 font-bold">+{(selectedTrade.mfe || 0).toFixed(1)}%</span></div>
+                                    <div><span className="text-gray-500">MAE:</span> <span className="text-red-500 font-bold">{(selectedTrade.mae || 0).toFixed(1)}%</span></div>
+                                    <div><span className="text-gray-500">PnL:</span> <span className={(selectedTrade.realized_pnl || 0) >= 0 ? 'text-emerald-500 font-bold' : 'text-red-500 font-bold'}>{(selectedTrade.realized_pnl || 0) >= 0 ? '+' : ''}{(selectedTrade.realized_pnl || 0).toFixed(1)}%</span></div>
+                                    <div><span className="text-gray-500">{language === 'zh' ? '效率' : 'Eff'}:</span> <span className="text-blue-500 font-bold">{((selectedTrade.trade_efficiency || 0) * 100).toFixed(0)}%</span></div>
+                                </div>
+                            </div>
+                        )}
                     </CardContent>
                 </Card>
             )}
@@ -312,7 +347,13 @@ function MFEMAETab({ language }: { language: string }) {
                                 <tbody>
                                     {records.slice(0, 20).map((r, idx) => (
                                         <tr key={idx} className="border-b border-gray-100 dark:border-gray-800">
-                                            <td className="py-2 px-2 font-medium">{r.symbol}</td>
+                                            <td className="py-2 px-2 font-medium">
+                                                <div className="flex items-center gap-2">
+                                                    {r.symbol}
+                                                    {(r as any).instrument_type === 'combo' && <span className="px-1.5 py-0.5 text-xs bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400 rounded">🔗</span>}
+                                                    {(r as any).instrument_type === 'option' && <span className="px-1.5 py-0.5 text-xs bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400 rounded">📊</span>}
+                                                </div>
+                                            </td>
                                             <td className="py-2 px-2 text-gray-500">{r.entry_date}</td>
                                             <td className="py-2 px-2 text-right text-emerald-500">
                                                 {r.mfe != null ? `+${r.mfe.toFixed(1)}%` : 'N/A'}
@@ -358,6 +399,73 @@ function MFEMAETab({ language }: { language: string }) {
                     </CardContent>
                 </Card>
             )}
+        </div>
+    );
+}
+
+// MFE/MAE 散點圖（象限分析）
+function MFEMAEScatterPlot({ records, language, onSelect }: { records: MFEMAERecord[]; language: string; onSelect?: (r: MFEMAERecord) => void }) {
+    const validRecords = records.filter(r => r.mfe != null && r.mae != null);
+    if (validRecords.length === 0) return <div className="text-center text-gray-500 py-8">{language === 'zh' ? '沒有數據' : 'No data'}</div>;
+
+    const chartSize = 360;
+    const padding = 50;
+    const plotArea = chartSize - padding * 2;
+    const maxMFE = Math.max(...validRecords.map(r => r.mfe || 0), 10);
+    const minMAE = Math.min(...validRecords.map(r => r.mae || 0), -10);
+    const maxRange = Math.max(maxMFE, Math.abs(minMAE));
+    const scaleX = (mae: number) => padding + ((mae + maxRange) / (maxRange * 2)) * plotArea;
+    const scaleY = (mfe: number) => padding + ((maxRange - mfe) / (maxRange * 2)) * plotArea;
+    const centerX = padding + plotArea / 2;
+    const centerY = padding + plotArea / 2;
+
+    // 統計
+    const avgMFE = validRecords.reduce((s, r) => s + (r.mfe || 0), 0) / validRecords.length;
+    const avgMAE = validRecords.reduce((s, r) => s + (r.mae || 0), 0) / validRecords.length;
+    const avgEff = validRecords.reduce((s, r) => s + (r.trade_efficiency || 0), 0) / validRecords.length;
+    const leftOnTable = validRecords.reduce((s, r) => s + ((r.mfe || 0) - (r.realized_pnl || 0)), 0) / validRecords.length;
+
+    return (
+        <div className="space-y-4">
+            <div className="grid grid-cols-4 gap-3 text-sm">
+                <div className="bg-emerald-50 dark:bg-emerald-900/20 rounded-lg p-2 text-center"><div className="text-gray-500 text-xs">Avg MFE</div><div className="text-emerald-500 font-bold">+{avgMFE.toFixed(1)}%</div></div>
+                <div className="bg-red-50 dark:bg-red-900/20 rounded-lg p-2 text-center"><div className="text-gray-500 text-xs">Avg MAE</div><div className="text-red-500 font-bold">{avgMAE.toFixed(1)}%</div></div>
+                <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-2 text-center"><div className="text-gray-500 text-xs">{language === 'zh' ? '效率' : 'Eff'}</div><div className="text-blue-500 font-bold">{(avgEff * 100).toFixed(0)}%</div></div>
+                <div className="bg-yellow-50 dark:bg-yellow-900/20 rounded-lg p-2 text-center"><div className="text-gray-500 text-xs">{language === 'zh' ? '少賺' : 'Left'}</div><div className="text-yellow-600 font-bold">+{leftOnTable.toFixed(1)}%</div></div>
+            </div>
+            <svg viewBox={`0 0 ${chartSize} ${chartSize}`} className="w-full max-w-sm mx-auto">
+                <rect x={centerX} y={padding} width={plotArea / 2} height={plotArea / 2} fill="#10B98115" />
+                <rect x={padding} y={padding} width={plotArea / 2} height={plotArea / 2} fill="#F5900015" />
+                <rect x={centerX} y={centerY} width={plotArea / 2} height={plotArea / 2} fill="#6B728015" />
+                <rect x={padding} y={centerY} width={plotArea / 2} height={plotArea / 2} fill="#EF444415" />
+                <line x1={centerX} y1={padding} x2={centerX} y2={chartSize - padding} stroke="#6B7280" strokeWidth="1" />
+                <line x1={padding} y1={centerY} x2={chartSize - padding} y2={centerY} stroke="#6B7280" strokeWidth="1" />
+                <text x={centerX + plotArea / 4} y={padding + 30} textAnchor="middle" className="text-xs fill-emerald-500">✅ {language === 'zh' ? '完美' : 'Perfect'}</text>
+                <text x={padding + plotArea / 4} y={padding + 30} textAnchor="middle" className="text-xs fill-yellow-500">😰 {language === 'zh' ? '驚險' : 'Risky'}</text>
+                <text x={centerX + plotArea / 4} y={centerY + 30} textAnchor="middle" className="text-xs fill-gray-400">😐 {language === 'zh' ? '平淡' : 'Flat'}</text>
+                <text x={padding + plotArea / 4} y={centerY + 30} textAnchor="middle" className="text-xs fill-red-400">❌ {language === 'zh' ? '糟糕' : 'Bad'}</text>
+                {validRecords.map((r, i) => {
+                    const x = scaleX(r.mae || 0);
+                    const y = scaleY(r.mfe || 0);
+                    const isProfit = (r.realized_pnl || 0) >= 0;
+                    const type = (r as any).instrument_type || 'stock';
+                    const size = Math.max(6, Math.min(14, Math.abs(r.realized_pnl || 0) / 2 + 6));
+                    return (
+                        <circle key={i} cx={x} cy={y} r={size}
+                            fill={isProfit ? '#10B981' : '#EF4444'} fillOpacity={0.7}
+                            stroke={type === 'combo' ? '#A855F7' : type === 'option' ? '#3B82F6' : '#fff'}
+                            strokeWidth={type === 'combo' || type === 'option' ? 3 : 1}
+                            className="cursor-pointer hover:opacity-100 transition-opacity"
+                            onClick={() => onSelect?.(r)}
+                        ><title>{r.symbol}: MFE {(r.mfe || 0).toFixed(1)}%, MAE {(r.mae || 0).toFixed(1)}%, PnL {(r.realized_pnl || 0).toFixed(1)}%</title></circle>
+                    );
+                })}
+                <text x={chartSize - padding + 5} y={centerY + 4} className="text-xs fill-gray-400">0%</text>
+                <text x={padding - 5} y={centerY + 4} textAnchor="end" className="text-xs fill-gray-400">{minMAE.toFixed(0)}%</text>
+                <text x={centerX} y={padding - 8} textAnchor="middle" className="text-xs fill-gray-400">+{maxRange.toFixed(0)}%</text>
+                <text x={centerX} y={chartSize - padding + 15} textAnchor="middle" className="text-xs fill-gray-400">0%</text>
+            </svg>
+            <div className="text-xs text-gray-500 text-center">💡 X軸: MAE | Y軸: MFE | {language === 'zh' ? '點擊查看詳情' : 'Click to view details'}</div>
         </div>
     );
 }
