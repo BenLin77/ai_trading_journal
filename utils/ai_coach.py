@@ -112,22 +112,34 @@ class GeminiProvider(AIProvider):
     
     # 模型配置
     FAST_MODEL = "gemini-2.0-flash"  # 快速對話
-    THINKING_MODEL = "gemini-2.5-flash-preview-05-20"  # 思考型模型 (Gemini 2.5 with thinking)
+    THINKING_MODEL = "gemini-2.0-flash-thinking-exp-01-21"  # 思考型模型
     
     def __init__(self, api_key: str):
         import google.generativeai as genai
         genai.configure(api_key=api_key)
         self.genai = genai
         
-        # 初始化兩個模型
+        # 初始化 Fast 模型
         self.fast_model = genai.GenerativeModel(self.FAST_MODEL)
-        self.thinking_model = genai.GenerativeModel(
-            self.THINKING_MODEL,
-            generation_config=genai.GenerationConfig(
-                thinking_config=genai.ThinkingConfig(thinking_budget=8192)
-            )
-        )
-        logger.info(f"Gemini 初始化完成 (Fast: {self.FAST_MODEL}, Thinking: {self.THINKING_MODEL})")
+        
+        # 嘗試初始化 Thinking 模型（兼容舊版本 SDK）
+        try:
+            # 新版 SDK 支持 ThinkingConfig
+            if hasattr(genai, 'ThinkingConfig'):
+                self.thinking_model = genai.GenerativeModel(
+                    self.THINKING_MODEL,
+                    generation_config=genai.GenerationConfig(
+                        thinking_config=genai.ThinkingConfig(thinking_budget=8192)
+                    )
+                )
+            else:
+                # 舊版 SDK，使用相同模型但不設定 thinking_config
+                self.thinking_model = genai.GenerativeModel(self.THINKING_MODEL)
+        except Exception as e:
+            logger.warning(f"Thinking 模型初始化失敗，使用 Fast 模型替代: {e}")
+            self.thinking_model = self.fast_model
+            
+        logger.info(f"Gemini 初始化完成 (Fast: {self.FAST_MODEL})")
     
     def generate_content(self, prompt: str, use_thinking: bool = False) -> str:
         model = self.thinking_model if use_thinking else self.fast_model
@@ -138,6 +150,7 @@ class GeminiProvider(AIProvider):
         # Thinking model 可能有 thoughts
         if use_thinking and hasattr(response, 'candidates') and response.candidates:
             for part in response.candidates[0].content.parts:
+
                 if hasattr(part, 'thought') and part.thought:
                     logger.debug(f"Thinking 過程: {part.text[:500]}...")
         

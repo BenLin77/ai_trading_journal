@@ -61,22 +61,33 @@ def get_ai_coach():
     """取得 AI 教練實例（從資料庫讀取 API Key）"""
     global ai_coach
     
-    # 從資料庫讀取設定
+    # 從資料庫或環境變數讀取設定
     gemini_key = db.get_setting('GEMINI_API_KEY') or os.getenv('GEMINI_API_KEY')
     deepseek_key = db.get_setting('DEEPSEEK_API_KEY') or os.getenv('DEEPSEEK_API_KEY')
-    ai_provider = db.get_setting('AI_PROVIDER') or os.getenv('AI_PROVIDER', 'gemini')
+    ai_provider = db.get_setting('AI_PROVIDER') or os.getenv('AI_PROVIDER', 'auto')
     
     if not gemini_key and not deepseek_key:
+        logger.warning("未找到任何 AI API Key (DEEPSEEK_API_KEY 或 GEMINI_API_KEY)")
         return None
     
     try:
+        # 優先順序: 1. 明確指定的 provider 2. DeepSeek 優先 3. Gemini 備用
         if ai_provider == 'deepseek' and deepseek_key:
             ai_coach = AICoach(api_key=deepseek_key, provider='deepseek')
+            logger.info("AI Coach 使用 DeepSeek")
+        elif ai_provider == 'gemini' and gemini_key:
+            ai_coach = AICoach(api_key=gemini_key, provider='gemini')
+            logger.info("AI Coach 使用 Gemini")
+        elif deepseek_key:
+            # 預設優先使用 DeepSeek（費用更低）
+            ai_coach = AICoach(api_key=deepseek_key, provider='deepseek')
+            logger.info("AI Coach 使用 DeepSeek (預設優先)")
         elif gemini_key:
             ai_coach = AICoach(api_key=gemini_key, provider='gemini')
+            logger.info("AI Coach 使用 Gemini (備用)")
         return ai_coach
     except Exception as e:
-        print(f"AI Coach 初始化失敗: {e}")
+        logger.error(f"AI Coach 初始化失敗: {e}")
         return None
 
 
