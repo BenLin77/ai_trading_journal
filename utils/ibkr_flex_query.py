@@ -12,7 +12,10 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 import pandas as pd
+import logging
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 # 引入安全解析工具
 from utils.validators import safe_float, safe_int, safe_date_parse
@@ -364,16 +367,20 @@ class IBKRFlexQuery:
         except ET.ParseError as e:
             raise Exception(f"XML 解析失敗: {str(e)}")
 
-    def _get_report(self, reference_code: str) -> str:
+    def _get_report(self, reference_code: str, max_retries: int = 5, retry_delay: int = 10) -> str:
         """
         Step 2: 取得已生成的報表
 
         Args:
             reference_code: 報表參考碼
+            max_retries: 最大重試次數（針對 1019 錯誤）
+            retry_delay: 重試間隔秒數
 
         Returns:
             content: 報表內容（XML 或 CSV）
         """
+        import time
+        
         url = f"{self.BASE_URL}/FlexStatementService.GetStatement"
         params = {
             't': self.token,
@@ -381,21 +388,31 @@ class IBKRFlexQuery:
             'v': '3'
         }
 
-        try:
-            response = self.session.get(url, params=params, timeout=30)
-            response.raise_for_status()
+        for attempt in range(max_retries):
+            try:
+                response = self.session.get(url, params=params, timeout=30)
+                response.raise_for_status()
 
-            # 檢查是否為錯誤回應
-            if '<Status>Fail</Status>' in response.text:
-                root = ET.fromstring(response.content)
-                error_code = root.find('.//ErrorCode').text
-                error_msg = root.find('.//ErrorMessage').text
-                raise Exception(f"取得報表失敗: {error_code} - {error_msg}")
+                # 檢查是否為錯誤回應
+                if '<Status>Fail</Status>' in response.text:
+                    root = ET.fromstring(response.content)
+                    error_code = root.find('.//ErrorCode').text
+                    error_msg = root.find('.//ErrorMessage').text
+                    raise Exception(f"取得報表失敗: {error_code} - {error_msg}")
+                
+                # 檢查 1019 錯誤（報表生成中）
+                if '<Status>Warn</Status>' in response.text and '<ErrorCode>1019</ErrorCode>' in response.text:
+                    if attempt < max_retries - 1:
+                        logger.info(f"報表生成中，等待 {retry_delay} 秒後重試... ({attempt + 1}/{max_retries})")
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        raise Exception("報表生成逾時，請稍後再試")
 
-            return response.text
+                return response.text
 
-        except requests.exceptions.RequestException as e:
-            raise Exception(f"網路請求失敗: {str(e)}")
+            except requests.exceptions.RequestException as e:
+                raise Exception(f"網路請求失敗: {str(e)}")
 
     def _detect_format(self, content: str) -> str:
         """
@@ -630,29 +647,52 @@ class IBKRFlexQuery:
     def _parse_cash_report_csv(self, csv_content: str) -> List[Dict]:
         """
         解析現金報表 CSV
+        
+        注意：IBKR Flex Query 可能返回多區段 CSV，每個區段有不同的欄位數。
+        Cash Report 通常在最開始的幾行，有 EndingCash、EndingSettledCash 等欄位。
         """
+        import csv
         from io import StringIO
         
-        try:
-            df = pd.read_csv(StringIO(csv_content))
-        except Exception:
-            return []
-        
-        # 尋找 Cash Report 相關欄位
-        cash_columns = ['Currency', 'EndingCash', 'EndingSettledCash', 'StartingCash']
-        if not any(col in df.columns for col in cash_columns):
-            return []
-        
         cash_reports = []
-        for _, row in df.iterrows():
-            if 'Currency' in row and pd.notna(row.get('Currency')):
+        
+        try:
+            lines = csv_content.strip().split('\n')
+            if len(lines) < 2:
+                return []
+            
+            # 用 csv 模組正確解析（處理引號內的逗號）
+            reader = csv.reader(StringIO('\n'.join(lines[:2])))
+            rows = list(reader)
+            
+            if len(rows) < 2:
+                return []
+            
+            header = rows[0]
+            data = rows[1]
+            
+            # 建立 header -> value 映射
+            row_dict = dict(zip(header, data))
+            
+            # 檢查是否有 Cash Report 欄位
+            if 'EndingCash' in row_dict or 'EndingSettledCash' in row_dict:
+                # 取得 CurrencyPrimary 或使用 USD
+                currency = row_dict.get('CurrencyPrimary', 'USD')
+                if currency == 'BASE_SUMMARY':
+                    currency = 'USD'
+                
                 cash_data = {
-                    'currency': str(row.get('Currency', 'USD')),
-                    'starting_cash': safe_float(row.get('StartingCash'), 0),
-                    'ending_cash': safe_float(row.get('EndingCash'), 0),
-                    'ending_settled_cash': safe_float(row.get('EndingSettledCash'), 0),
+                    'currency': currency,
+                    'starting_cash': safe_float(row_dict.get('StartingCash'), 0),
+                    'ending_cash': safe_float(row_dict.get('EndingCash'), 0),
+                    'ending_settled_cash': safe_float(row_dict.get('EndingSettledCash'), 0),
                 }
                 cash_reports.append(cash_data)
+                logger.info(f"解析到現金餘額: ending_cash={cash_data['ending_cash']}, settled={cash_data['ending_settled_cash']}")
+            
+        except Exception as e:
+            logger.warning(f"解析 Cash Report CSV 失敗: {e}")
+            return []
         
         return cash_reports
 
