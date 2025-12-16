@@ -14,6 +14,9 @@ from dataclasses import dataclass
 import pandas as pd
 from dotenv import load_dotenv
 
+# 引入安全解析工具
+from utils.validators import safe_float, safe_int, safe_date_parse
+
 load_dotenv()
 
 
@@ -425,23 +428,23 @@ class IBKRFlexQuery:
         
         trades = []
         for _, row in df.iterrows():
-            # 處理日期時間
+            # 處理日期時間 - 使用安全解析
             date_time = None
             if 'Date/Time' in row:
-                date_time = str(row['Date/Time'])
+                date_time = safe_date_parse(row['Date/Time']) or str(row['Date/Time'])
             elif 'TradeDate' in row:
                 trade_date = str(row['TradeDate'])
                 trade_time = str(row.get('TradeTime', ''))
-                if trade_date and len(trade_date) == 8:
-                    # 格式: YYYYMMDD
-                    date_time = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}"
-                    if trade_time:
+                parsed_date = safe_date_parse(trade_date)
+                if parsed_date:
+                    date_time = parsed_date
+                    if trade_time and trade_time != 'nan':
                         date_time += f" {trade_time}"
                 else:
                     date_time = trade_date
             
-            # 判斷買賣方向
-            quantity = float(row.get('Quantity', 0))
+            # 判斷買賣方向 - 使用安全解析
+            quantity = safe_float(row.get('Quantity'), 0)
             buy_sell = str(row.get('Buy/Sell', ''))
             if buy_sell.upper() == 'SELL' or quantity < 0:
                 quantity = -abs(quantity)
@@ -452,10 +455,10 @@ class IBKRFlexQuery:
                 'symbol': str(row.get('Symbol', '')),
                 'date_time': date_time,
                 'quantity': quantity,
-                'price': float(row.get('TradePrice', row.get('Price', 0))),
-                'proceeds': float(row.get('Proceeds', 0)),
-                'commission': float(row.get('IBCommission', row.get('Commission', 0))),
-                'net_cash': float(row.get('NetCash', 0)),
+                'price': safe_float(row.get('TradePrice', row.get('Price', 0)), 0, allow_negative=False),
+                'proceeds': safe_float(row.get('Proceeds'), 0),
+                'commission': safe_float(row.get('IBCommission', row.get('Commission', 0)), 0),
+                'net_cash': safe_float(row.get('NetCash'), 0),
                 'asset_category': str(row.get('AssetClass', 'STK')),
                 'description': str(row.get('Description', '')),
                 # 選擇權相關欄位
@@ -465,7 +468,7 @@ class IBKRFlexQuery:
                 'multiplier': str(row.get('Multiplier', '1')),
                 'underlying': str(row.get('UnderlyingSymbol', '')),
                 # 損益欄位（如果有）
-                'realized_pnl': float(row.get('FifoPnlRealized', row.get('RealizedPnL', 0))),
+                'realized_pnl': safe_float(row.get('FifoPnlRealized', row.get('RealizedPnL', 0)), 0),
             }
             trades.append(trade_data)
         
@@ -489,11 +492,11 @@ class IBKRFlexQuery:
             trade_data = {
                 'symbol': trade.get('symbol'),
                 'date_time': trade.get('dateTime'),
-                'quantity': float(trade.get('quantity', 0)),
-                'price': float(trade.get('tradePrice', 0)),
-                'proceeds': float(trade.get('proceeds', 0)),
-                'commission': float(trade.get('commission', 0)),
-                'net_cash': float(trade.get('netCash', 0)),
+                'quantity': safe_float(trade.get('quantity'), 0),
+                'price': safe_float(trade.get('tradePrice'), 0, allow_negative=False),
+                'proceeds': safe_float(trade.get('proceeds'), 0),
+                'commission': safe_float(trade.get('commission'), 0),
+                'net_cash': safe_float(trade.get('netCash'), 0),
                 'asset_category': trade.get('assetCategory', 'STK'),
                 'description': trade.get('description', ''),
                 # 選擇權相關欄位
@@ -523,10 +526,10 @@ class IBKRFlexQuery:
         for position in root.findall('.//OpenPosition'):
             position_data = {
                 'symbol': position.get('symbol'),
-                'position': float(position.get('position', 0)),
-                'mark_price': float(position.get('markPrice', 0)),
-                'average_cost': float(position.get('costBasisPrice', 0)),
-                'unrealized_pnl': float(position.get('fifoPnlUnrealized', 0)),
+                'position': safe_float(position.get('position'), 0),
+                'mark_price': safe_float(position.get('markPrice'), 0, allow_negative=False),
+                'average_cost': safe_float(position.get('costBasisPrice'), 0, allow_negative=False),
+                'unrealized_pnl': safe_float(position.get('fifoPnlUnrealized'), 0),
                 'asset_category': position.get('assetCategory', 'STK'),
                 'description': position.get('description', ''),
                 # 選擇權相關欄位
@@ -556,18 +559,18 @@ class IBKRFlexQuery:
         for cash in root.findall('.//CashReport'):
             cash_data = {
                 'currency': cash.get('currency', 'USD'),
-                'starting_cash': float(cash.get('startingCash', 0)),
-                'ending_cash': float(cash.get('endingCash', 0)),
-                'ending_settled_cash': float(cash.get('endingSettledCash', 0)),
-                'deposits': float(cash.get('deposits', 0)),
-                'withdrawals': float(cash.get('withdrawals', 0)),
-                'deposits_withdrawals': float(cash.get('depositsWithdrawals', 0)),
-                'dividends': float(cash.get('dividends', 0)),
-                'broker_interest': float(cash.get('brokerInterest', 0)),
-                'net_trades_sales': float(cash.get('netTradesSales', 0)),
-                'net_trades_purchases': float(cash.get('netTradesPurchases', 0)),
-                'commissions': float(cash.get('commissions', 0)),
-                'other_fees': float(cash.get('otherFees', 0)),
+                'starting_cash': safe_float(cash.get('startingCash'), 0),
+                'ending_cash': safe_float(cash.get('endingCash'), 0),
+                'ending_settled_cash': safe_float(cash.get('endingSettledCash'), 0),
+                'deposits': safe_float(cash.get('deposits'), 0),
+                'withdrawals': safe_float(cash.get('withdrawals'), 0),
+                'deposits_withdrawals': safe_float(cash.get('depositsWithdrawals'), 0),
+                'dividends': safe_float(cash.get('dividends'), 0),
+                'broker_interest': safe_float(cash.get('brokerInterest'), 0),
+                'net_trades_sales': safe_float(cash.get('netTradesSales'), 0),
+                'net_trades_purchases': safe_float(cash.get('netTradesPurchases'), 0),
+                'commissions': safe_float(cash.get('commissions'), 0),
+                'other_fees': safe_float(cash.get('otherFees'), 0),
                 'from_date': cash.get('fromDate', ''),
                 'to_date': cash.get('toDate', ''),
             }
@@ -645,9 +648,9 @@ class IBKRFlexQuery:
             if 'Currency' in row and pd.notna(row.get('Currency')):
                 cash_data = {
                     'currency': str(row.get('Currency', 'USD')),
-                    'starting_cash': float(row.get('StartingCash', 0)),
-                    'ending_cash': float(row.get('EndingCash', 0)),
-                    'ending_settled_cash': float(row.get('EndingSettledCash', 0)),
+                    'starting_cash': safe_float(row.get('StartingCash'), 0),
+                    'ending_cash': safe_float(row.get('EndingCash'), 0),
+                    'ending_settled_cash': safe_float(row.get('EndingSettledCash'), 0),
                 }
                 cash_reports.append(cash_data)
         
@@ -758,10 +761,10 @@ class IBKRFlexQuery:
                         continue
                     position_data = {
                         'symbol': str(row.get('Symbol', '')),
-                        'position': float(row.get('Position', row.get('Quantity', 0))),
-                        'mark_price': float(row.get('MarkPrice', row.get('Mark', 0))),
-                        'average_cost': float(row.get('CostBasisPrice', row.get('AvgCost', 0))),
-                        'unrealized_pnl': float(row.get('FifoPnlUnrealized', row.get('UnrealizedP/L', 0))),
+                        'position': safe_float(row.get('Position', row.get('Quantity', 0)), 0),
+                        'mark_price': safe_float(row.get('MarkPrice', row.get('Mark', 0)), 0, allow_negative=False),
+                        'average_cost': safe_float(row.get('CostBasisPrice', row.get('AvgCost', 0)), 0, allow_negative=False),
+                        'unrealized_pnl': safe_float(row.get('FifoPnlUnrealized', row.get('UnrealizedP/L', 0)), 0),
                         'asset_category': str(row.get('AssetClass', 'STK')),
                         'description': str(row.get('Description', '')),
                         'put_call': str(row.get('Put/Call', '')),
@@ -813,14 +816,14 @@ class IBKRFlexQuery:
                 if i < len(values):
                     row_dict[h] = values[i]
             
-            # 轉換為 position_data
+            # 轉換為 position_data - 使用安全解析
             try:
                 position_data = {
                     'symbol': row_dict.get('Symbol', ''),
-                    'position': float(row_dict.get('Quantity', 0)),
-                    'mark_price': float(row_dict.get('MarkPrice', 0)),
-                    'average_cost': float(row_dict.get('CostBasisPrice', 0)),
-                    'unrealized_pnl': float(row_dict.get('FifoPnlUnrealized', 0)),
+                    'position': safe_float(row_dict.get('Quantity'), 0),
+                    'mark_price': safe_float(row_dict.get('MarkPrice'), 0, allow_negative=False),
+                    'average_cost': safe_float(row_dict.get('CostBasisPrice'), 0, allow_negative=False),
+                    'unrealized_pnl': safe_float(row_dict.get('FifoPnlUnrealized'), 0),
                     'asset_category': row_dict.get('AssetClass', 'STK'),
                     'description': '',
                     'put_call': row_dict.get('Put/Call', ''),
@@ -918,20 +921,24 @@ class IBKRFlexQuery:
         
         trades = []
         for _, row in df.iterrows():
-            # 處理日期
-            trade_date = str(row.get('TradeDate', ''))
-            if trade_date and len(trade_date) == 8:
-                trade_date = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}"
+            # 處理日期 - 使用安全解析
+            trade_date = safe_date_parse(row.get('TradeDate')) or str(row.get('TradeDate', ''))
             
             # 處理時間
             date_time = str(row.get('DateTime', ''))
             if ';' in date_time:
                 parts = date_time.split(';')
-                if len(parts) == 2 and len(parts[0]) == 8:
-                    date_time = f"{parts[0][:4]}-{parts[0][4:6]}-{parts[0][6:8]} {parts[1]}"
+                if len(parts) == 2 and len(parts[0]) >= 8:
+                    parsed = safe_date_parse(parts[0])
+                    if parsed:
+                        date_time = f"{parsed} {parts[1]}"
+            elif date_time:
+                parsed = safe_date_parse(date_time)
+                if parsed:
+                    date_time = parsed
             
-            # 判斷買賣方向
-            quantity = float(row.get('Quantity', 0))
+            # 判斷買賣方向 - 使用安全解析
+            quantity = safe_float(row.get('Quantity'), 0)
             buy_sell = str(row.get('Buy/Sell', ''))
             
             trade_data = {
@@ -942,12 +949,12 @@ class IBKRFlexQuery:
                 'asset_class': str(row.get('AssetClass', 'STK')),
                 'buy_sell': buy_sell,
                 'quantity': quantity,
-                'price': float(row.get('TradePrice', 0)),
-                'proceeds': float(row.get('Proceeds', 0)),
-                'commission': float(row.get('IBCommission', 0)),
-                'net_cash': float(row.get('NetCash', 0)),
-                'realized_pnl': float(row.get('FifoPnlRealized', 0)),
-                'mtm_pnl': float(row.get('MtmPnl', 0)),
+                'price': safe_float(row.get('TradePrice'), 0, allow_negative=False),
+                'proceeds': safe_float(row.get('Proceeds'), 0),
+                'commission': safe_float(row.get('IBCommission'), 0),
+                'net_cash': safe_float(row.get('NetCash'), 0),
+                'realized_pnl': safe_float(row.get('FifoPnlRealized'), 0),
+                'mtm_pnl': safe_float(row.get('MtmPnl'), 0),
                 'open_close': str(row.get('Open/CloseIndicator', '')),
                 'exchange': str(row.get('Exchange', '')),
                 'order_type': str(row.get('OrderType', '')),

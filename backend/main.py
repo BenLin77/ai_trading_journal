@@ -219,6 +219,43 @@ class SaveConfigRequest(BaseModel):
 
 # ========== Helper Functions ==========
 
+def _fetch_realtime_prices(underlyings: List[str]) -> Dict[str, float]:
+    """
+    批量從 yfinance 獲取即時股價
+    
+    Args:
+        underlyings: 股票代號列表
+        
+    Returns:
+        Dict[symbol, price]: 股票代號對應的最新價格
+    """
+    prices = {}
+    
+    if not underlyings:
+        return prices
+    
+    try:
+        import yfinance as yf
+        
+        # 使用 yfinance 批量下載（更高效）
+        unique_symbols = list(set(underlyings))
+        
+        # 對於少量股票，逐一獲取較穩定
+        for symbol in unique_symbols:
+            try:
+                ticker = yf.Ticker(symbol)
+                hist = ticker.history(period="1d")
+                if len(hist) > 0:
+                    prices[symbol] = float(hist['Close'].iloc[-1])
+            except Exception:
+                # 單個股票失敗不影響其他
+                pass
+                
+    except Exception as e:
+        logger.warning(f"獲取即時價格失敗: {e}")
+    
+    return prices
+
 def _calculate_positions_from_trades() -> List[Dict]:
     """從交易記錄計算當前持倉"""
     trades = db.get_trades()
@@ -262,33 +299,20 @@ def _calculate_positions_from_trades() -> List[Dict]:
             positions_by_symbol[symbol]['buy_qty'] += qty_change
     
     # 轉換為持倉列表（只保留有持倉的）
+    # 注意：價格更新由 get_portfolio() 中的 _fetch_realtime_prices() 統一處理
     result = []
     for symbol, pos in positions_by_symbol.items():
         if pos['position'] != 0:  # 有持倉
             avg_cost = pos['total_cost'] / pos['buy_qty'] if pos['buy_qty'] > 0 else 0
             
-            # 嘗試取得即時價格
-            mark_price = 0
-            unrealized_pnl = 0
             parsed = parser.parse_symbol(symbol)
-            
-            if pos['asset_category'] == 'STK':
-                try:
-                    import yfinance as yf
-                    ticker = yf.Ticker(parsed['underlying'])
-                    hist = ticker.history(period="1d")
-                    if len(hist) > 0:
-                        mark_price = float(hist['Close'].iloc[-1])
-                        unrealized_pnl = (mark_price - avg_cost) * pos['position']
-                except Exception:
-                    pass
             
             result.append({
                 'symbol': symbol,
                 'position': pos['position'],
-                'mark_price': mark_price,
+                'mark_price': 0,  # 價格由 get_portfolio() 統一從 yfinance 獲取
                 'average_cost': avg_cost,
-                'unrealized_pnl': unrealized_pnl,
+                'unrealized_pnl': 0,  # 由 get_portfolio() 重新計算
                 'asset_category': pos['asset_category'],
                 'strike': pos.get('strike'),
                 'expiry': pos.get('expiry'),
@@ -516,8 +540,49 @@ async def get_portfolio():
     import pandas as pd
     positions_df = pd.DataFrame(positions_raw) if positions_raw else pd.DataFrame()
     
-    # 按 underlying 分組持倉
+    # ========== 即時價格更新 ==========
+    # 策略：即時價格一律從 Yahoo Finance 獲取（IBKR 價格過時）
+    # 注意：回測場景會有另外的緩存機制，這裡只處理即時價格
     parser = InstrumentParser()
+    underlyings_to_fetch = set()
+    
+    for pos in positions_raw:
+        symbol = pos.get('symbol', '')
+        parsed = parser.parse_symbol(symbol)
+        underlying = parsed.get('underlying', symbol)
+        asset_cat = pos.get('asset_category', 'STK')
+        
+        # 只抓取股票類型的即時價格（選擇權價格依賴 IBKR 快照）
+        if asset_cat in ['STK', 'stock'] or parsed.get('instrument_type') == 'stock':
+            underlyings_to_fetch.add(underlying)
+    
+    # 批量從 yfinance 獲取即時價格
+    realtime_prices = {}
+    if underlyings_to_fetch:
+        realtime_prices = _fetch_realtime_prices(list(underlyings_to_fetch))
+    
+    # 更新持倉的 mark_price 和 unrealized_pnl
+    for pos in positions_raw:
+        symbol = pos.get('symbol', '')
+        parsed = parser.parse_symbol(symbol)
+        underlying = parsed.get('underlying', symbol)
+        asset_cat = pos.get('asset_category', 'STK')
+        
+        # 只更新股票類型
+        if asset_cat in ['STK', 'stock'] or parsed.get('instrument_type') == 'stock':
+            if underlying in realtime_prices:
+                new_price = realtime_prices[underlying]
+                
+                # 更新價格（覆蓋 IBKR 過時價格）
+                pos['mark_price'] = new_price
+                
+                # 重新計算未實現盈虧
+                avg_cost = pos.get('average_cost', 0)
+                quantity = pos.get('position', 0)
+                if avg_cost > 0 and quantity != 0:
+                    pos['unrealized_pnl'] = (new_price - avg_cost) * quantity
+    
+    # 按 underlying 分組持倉
     grouped_positions = {}
     
     for pos in positions_raw:

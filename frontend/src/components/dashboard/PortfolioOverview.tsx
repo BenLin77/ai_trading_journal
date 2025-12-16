@@ -3,12 +3,13 @@
 import { useAppStore } from '@/lib/store';
 import { t } from '@/lib/i18n';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { PortfolioOverview as PortfolioData } from '@/lib/api';
+import { PortfolioOverview as PortfolioData, CashBalance } from '@/lib/api';
 import { formatCurrency, formatPercent, cn, getPnLColor } from '@/lib/utils';
-import { TrendingUp, TrendingDown, Wallet } from 'lucide-react';
+import { TrendingUp, TrendingDown, Wallet, Banknote } from 'lucide-react';
 
 interface PortfolioOverviewProps {
   portfolio: PortfolioData;
+  cashBalance?: CashBalance;
 }
 
 // 策略類型對應的顏色
@@ -28,7 +29,7 @@ const STRATEGY_COLORS: Record<string, { bg: string; text: string }> = {
   '選擇權組合': { bg: 'bg-cyan-100 dark:bg-cyan-900/30', text: 'text-cyan-600 dark:text-cyan-400' },
 };
 
-export function PortfolioOverview({ portfolio }: PortfolioOverviewProps) {
+export function PortfolioOverview({ portfolio, cashBalance }: PortfolioOverviewProps) {
   const { language } = useAppStore();
 
   if (!portfolio.positions.length) {
@@ -49,6 +50,16 @@ export function PortfolioOverview({ portfolio }: PortfolioOverviewProps) {
       <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle>📊 {t('portfolio_overview', language)}</CardTitle>
         <div className="flex items-center gap-4 text-sm">
+          {/* Cash Balance - 現金水位 */}
+          {cashBalance && (
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-blue-50 dark:bg-blue-900/20">
+              <Banknote className="h-4 w-4 text-blue-500" />
+              <span className="text-gray-500">{language === 'zh' ? '現金' : 'Cash'}:</span>
+              <span className="font-bold text-blue-600 dark:text-blue-400">
+                {formatCurrency(cashBalance.total_cash)}
+              </span>
+            </div>
+          )}
           <div className="flex items-center gap-2">
             <Wallet className="h-4 w-4 text-blue-500" />
             <span className="text-gray-500">{t('portfolio_market_value', language)}:</span>

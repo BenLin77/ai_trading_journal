@@ -5,9 +5,124 @@
 """
 
 import logging
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Optional, Union
 from datetime import datetime
 import pandas as pd
+
+
+def safe_float(value: Any, default: float = 0.0, allow_negative: bool = True) -> float:
+    """
+    安全地將值轉換為 float
+    
+    處理 IBKR 可能返回的各種異常情況：
+    - None, NaN, 空字串
+    - 無法解析的字串
+    - 可選的負值處理
+    
+    Args:
+        value: 要轉換的值
+        default: 轉換失敗時的預設值
+        allow_negative: 是否允許負值（False 時取絕對值）
+        
+    Returns:
+        float: 轉換後的數值
+    """
+    if value is None:
+        return default
+    
+    if isinstance(value, str):
+        value = value.strip()
+        if value == '' or value.lower() in ['nan', 'none', 'null', '-', '--']:
+            return default
+    
+    try:
+        result = float(value)
+        
+        # 檢查 NaN
+        if pd.isna(result):
+            return default
+        
+        # 處理負值
+        if not allow_negative and result < 0:
+            return abs(result)
+        
+        return result
+    except (ValueError, TypeError):
+        return default
+
+
+def safe_int(value: Any, default: int = 0, allow_negative: bool = True) -> int:
+    """
+    安全地將值轉換為 int
+    
+    Args:
+        value: 要轉換的值
+        default: 轉換失敗時的預設值
+        allow_negative: 是否允許負值
+        
+    Returns:
+        int: 轉換後的整數
+    """
+    result = safe_float(value, float(default), allow_negative)
+    return int(result)
+
+
+def safe_date_parse(date_str: Any, formats: Optional[List[str]] = None) -> Optional[str]:
+    """
+    安全地解析日期字串並返回標準格式 (YYYY-MM-DD)
+    
+    處理 IBKR 的多種日期格式：
+    - YYYYMMDD
+    - YYYY-MM-DD
+    - YYYYMMDD;HHMMSS
+    - YYYY/MM/DD
+    
+    Args:
+        date_str: 日期字串
+        formats: 自定義格式列表
+        
+    Returns:
+        標準格式的日期字串，或 None
+    """
+    if date_str is None:
+        return None
+    
+    date_str = str(date_str).strip()
+    if not date_str or date_str.lower() in ['nan', 'none', 'null']:
+        return None
+    
+    # 處理帶有時間的格式 (YYYYMMDD;HHMMSS)
+    if ';' in date_str:
+        date_str = date_str.split(';')[0]
+    
+    # 嘗試的格式列表
+    if formats is None:
+        formats = [
+            '%Y%m%d',
+            '%Y-%m-%d',
+            '%Y/%m/%d',
+            '%Y-%m-%d %H:%M:%S',
+            '%Y%m%d%H%M%S',
+        ]
+    
+    for fmt in formats:
+        try:
+            parsed = datetime.strptime(date_str[:len(fmt.replace('%Y', 'YYYY').replace('%m', 'MM').replace('%d', 'DD').replace('%H', 'HH').replace('%M', 'MM').replace('%S', 'SS'))], fmt)
+            return parsed.strftime('%Y-%m-%d')
+        except (ValueError, TypeError):
+            continue
+    
+    # 處理純數字 8 位格式 (YYYYMMDD)
+    if len(date_str) >= 8 and date_str[:8].isdigit():
+        try:
+            year = date_str[0:4]
+            month = date_str[4:6]
+            day = date_str[6:8]
+            return f"{year}-{month}-{day}"
+        except:
+            pass
+    
+    return None
 
 
 class TradeValidator:

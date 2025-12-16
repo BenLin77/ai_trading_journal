@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { apiClient } from '@/lib/api';
 import { useAppStore } from '@/lib/store';
@@ -8,14 +8,14 @@ import { t } from '@/lib/i18n';
 import { KPICards } from '@/components/dashboard/KPICards';
 import { EquityChart } from '@/components/dashboard/EquityChart';
 import { PortfolioOverview } from '@/components/dashboard/PortfolioOverview';
-import { Loader2, Calendar } from 'lucide-react';
+import { Loader2, Calendar, Clock } from 'lucide-react';
 
 type DateRange = 'all' | '7d' | '30d' | '90d' | 'ytd' | 'custom';
 
 function getDateRange(range: DateRange): { start_date?: string; end_date?: string } {
   const today = new Date();
   const formatDate = (d: Date) => d.toISOString().split('T')[0];
-  
+
   switch (range) {
     case '7d':
       const d7 = new Date(today);
@@ -43,6 +43,7 @@ export default function Dashboard() {
   const [dateRange, setDateRange] = useState<DateRange>('all');
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   const dateParams = useMemo(() => {
     if (dateRange === 'custom' && customStart && customEnd) {
@@ -61,16 +62,26 @@ export default function Dashboard() {
     queryFn: () => apiClient.getEquityCurve(dateParams),
   });
 
-  const { data: portfolio, isLoading: portfolioLoading } = useQuery({
+  const { data: portfolio, isLoading: portfolioLoading, dataUpdatedAt } = useQuery({
     queryKey: ['portfolio'],
     queryFn: apiClient.getPortfolio,
+    refetchInterval: 60000, // 每 60 秒自動刷新價格
+    refetchIntervalInBackground: false, // 背景時不刷新（省資源）
   });
 
   const { data: cashBalance } = useQuery({
     queryKey: ['cash-balance'],
     queryFn: apiClient.getCashBalance,
     retry: false,
+    refetchInterval: 60000,
   });
+
+  // 更新上次更新時間
+  useEffect(() => {
+    if (dataUpdatedAt) {
+      setLastUpdated(new Date(dataUpdatedAt));
+    }
+  }, [dataUpdatedAt]);
 
   const isLoading = statsLoading || curveLoading || portfolioLoading;
 
@@ -85,42 +96,54 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
-      {/* Date Range Selector */}
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="flex items-center gap-2 text-sm text-gray-500">
-          <Calendar className="h-4 w-4" />
-          <span>{language === 'zh' ? '時間區間' : 'Date Range'}:</span>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {rangeOptions.map((opt) => (
-            <button
-              key={opt.value}
-              onClick={() => setDateRange(opt.value)}
-              className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
-                dateRange === opt.value
+      {/* Date Range Selector & Last Updated */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2 text-sm text-gray-500">
+            <Calendar className="h-4 w-4" />
+            <span>{language === 'zh' ? '時間區間' : 'Date Range'}:</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {rangeOptions.map((opt) => (
+              <button
+                key={opt.value}
+                onClick={() => setDateRange(opt.value)}
+                className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${dateRange === opt.value
                   ? 'bg-blue-600 text-white'
                   : 'bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700'
-              }`}
-            >
-              {opt.label}
-            </button>
-          ))}
+                  }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          {dateRange === 'custom' && (
+            <div className="flex items-center gap-2">
+              <input
+                type="date"
+                value={customStart}
+                onChange={(e) => setCustomStart(e.target.value)}
+                className="px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800"
+              />
+              <span className="text-gray-500">~</span>
+              <input
+                type="date"
+                value={customEnd}
+                onChange={(e) => setCustomEnd(e.target.value)}
+                className="px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800"
+              />
+            </div>
+          )}
         </div>
-        {dateRange === 'custom' && (
-          <div className="flex items-center gap-2">
-            <input
-              type="date"
-              value={customStart}
-              onChange={(e) => setCustomStart(e.target.value)}
-              className="px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800"
-            />
-            <span className="text-gray-500">~</span>
-            <input
-              type="date"
-              value={customEnd}
-              onChange={(e) => setCustomEnd(e.target.value)}
-              className="px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800"
-            />
+
+        {/* Last Updated Time (auto-refresh every 60s) */}
+        {lastUpdated && (
+          <div className="flex items-center gap-1.5 text-xs text-gray-400">
+            <Clock className="h-3.5 w-3.5" />
+            <span>
+              {language === 'zh' ? '價格更新於 ' : 'Prices updated at '}
+              {lastUpdated.toLocaleTimeString()}
+            </span>
           </div>
         )}
       </div>
@@ -137,8 +160,8 @@ export default function Dashboard() {
           {/* Equity Curve */}
           {equityCurve && <EquityChart data={equityCurve} />}
 
-          {/* Portfolio Overview */}
-          {portfolio && <PortfolioOverview portfolio={portfolio} />}
+          {/* Portfolio Overview - 傳入 cashBalance 讓持倉總覽顯示現金水位 */}
+          {portfolio && <PortfolioOverview portfolio={portfolio} cashBalance={cashBalance} />}
         </>
       )}
     </div>

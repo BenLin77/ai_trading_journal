@@ -24,7 +24,7 @@ export default function AIPage() {
   // 獲取統計數據
   const { data: stats } = useQuery({
     queryKey: ['statistics'],
-    queryFn: apiClient.getStatistics,
+    queryFn: () => apiClient.getStatistics(),
   });
 
   // AI 分析
