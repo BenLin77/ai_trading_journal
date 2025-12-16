@@ -864,14 +864,20 @@ async def sync_ibkr():
         # 同步現金快照（寫入 DB；portfolio 只讀 DB）
         try:
             cash_data = flex.get_cash_balance(query_id=history_qid)
-            db.upsert_cash_snapshot(
-                total_cash=float(cash_data.get('total_cash', 0) or 0),
-                total_settled_cash=float(cash_data.get('total_settled_cash', 0) or 0),
-                currency='USD',
-                snapshot_date=datetime.now().strftime('%Y-%m-%d'),
-            )
-        except Exception:
-            pass
+            logger.info(f"Cash data from IBKR: {cash_data}")
+            
+            if cash_data.get('error'):
+                logger.warning(f"Cash balance error: {cash_data.get('error')}")
+            else:
+                db.upsert_cash_snapshot(
+                    total_cash=float(cash_data.get('total_cash', 0) or 0),
+                    total_settled_cash=float(cash_data.get('total_settled_cash', 0) or 0),
+                    currency='USD',
+                    snapshot_date=datetime.now().strftime('%Y-%m-%d'),
+                )
+                logger.info(f"Cash snapshot saved: total_cash={cash_data.get('total_cash')}")
+        except Exception as e:
+            logger.error(f"Failed to sync cash balance: {e}")
         
         # 重算盈虧
         pnl_calc = PnLCalculator(db)
