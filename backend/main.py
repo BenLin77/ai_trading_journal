@@ -322,6 +322,147 @@ def _calculate_positions_from_trades() -> List[Dict]:
     return result
 
 
+async def _fetch_positions_from_gateway() -> List[Dict]:
+    """
+    從 IB Gateway 獲取即時持倉
+    
+    當 DATA_SOURCE=GATEWAY 時使用此函數取得即時數據。
+    
+    Returns:
+        List[Dict]: 持倉列表（格式與資料庫一致）
+    """
+    try:
+        from services.ib_service import IBService
+        
+        ib_host = os.getenv('IB_HOST', '127.0.0.1')
+        ib_port = int(os.getenv('IB_PORT', '4001'))
+        ib_client_id = int(os.getenv('IB_CLIENT_ID', '1'))
+        
+        async with IBService(host=ib_host, port=ib_port, client_id=ib_client_id) as ib:
+            positions = await ib.get_portfolio_summary()
+            
+            # 轉換為與資料庫格式一致的結構
+            result = []
+            for p in positions:
+                result.append({
+                    'symbol': p.symbol,
+                    'underlying': p.underlying,
+                    'position': p.quantity,
+                    'mark_price': p.market_price,
+                    'average_cost': p.avg_cost,
+                    'unrealized_pnl': p.unrealized_pnl,
+                    'realized_pnl': p.realized_pnl,
+                    'asset_category': p.asset_category,
+                    'strike': p.strike,
+                    'expiry': p.expiry,
+                    'put_call': p.put_call,
+                    'multiplier': p.multiplier,
+                    'source': 'gateway'
+                })
+            
+            logger.info(f"從 IB Gateway 獲取 {len(result)} 筆持倉")
+            return result
+            
+    except ImportError:
+        logger.error("ib_insync 未安裝，無法使用 GATEWAY 模式")
+        raise HTTPException(status_code=503, detail="ib_insync 未安裝，請執行: pip install ib_insync")
+    except Exception as e:
+        logger.error(f"IB Gateway 連線失敗: {e}")
+        raise HTTPException(status_code=503, detail=f"無法連接 IB Gateway: {str(e)}")
+
+
+def _get_data_source() -> str:
+    """
+    取得當前資料來源設定
+    
+    優先順序:
+    1. 資料庫設定 (data_source)
+    2. 環境變數 DATA_SOURCE
+    3. 預設值 QUERY
+    """
+    db_setting = db.get_setting('data_source') if db else None
+    if db_setting and db_setting.upper() in ['QUERY', 'GATEWAY']:
+        return db_setting.upper()
+    return os.getenv('DATA_SOURCE', 'QUERY').upper()
+
+
+async def _fetch_trades_from_gateway(hours: int = 24) -> List[Dict]:
+    """
+    從 IB Gateway 獲取最近的交易記錄
+    
+    Args:
+        hours: 獲取過去多少小時的交易 (預設 24 小時)
+        
+    Returns:
+        List[Dict]: 交易記錄列表（格式與資料庫一致）
+    """
+    try:
+        from services.ib_service import IBService
+        
+        ib_host = os.getenv('IB_HOST', '127.0.0.1')
+        ib_port = int(os.getenv('IB_PORT', '4001'))
+        ib_client_id = int(os.getenv('IB_CLIENT_ID', '1'))
+        
+        async with IBService(host=ib_host, port=ib_port, client_id=ib_client_id) as ib:
+            executions = await ib.get_yesterday_trades()
+            
+            # 轉換為與資料庫格式一致的結構
+            result = []
+            for t in executions:
+                result.append({
+                    'id': hash(t.exec_id) % 1000000,  # 生成一個 ID
+                    'symbol': t.symbol,
+                    'datetime': t.time.isoformat() if hasattr(t.time, 'isoformat') else str(t.time),
+                    'action': t.side,
+                    'quantity': t.quantity,
+                    'price': t.price,
+                    'commission': t.commission,
+                    'realized_pnl': t.realized_pnl,
+                    'notes': None,
+                    'source': 'gateway'
+                })
+            
+            logger.info(f"從 IB Gateway 獲取 {len(result)} 筆交易")
+            return result
+            
+    except ImportError:
+        logger.error("ib_insync 未安裝，無法使用 GATEWAY 模式")
+        return []
+    except Exception as e:
+        logger.error(f"IB Gateway 交易記錄獲取失敗: {e}")
+        return []
+
+
+async def _fetch_pnl_from_gateway() -> Dict[str, Any]:
+    """
+    從 IB Gateway 獲取帳戶損益統計
+    
+    Returns:
+        Dict: 損益統計資訊
+    """
+    try:
+        from services.ib_service import IBService
+        
+        ib_host = os.getenv('IB_HOST', '127.0.0.1')
+        ib_port = int(os.getenv('IB_PORT', '4001'))
+        ib_client_id = int(os.getenv('IB_CLIENT_ID', '1'))
+        
+        async with IBService(host=ib_host, port=ib_port, client_id=ib_client_id) as ib:
+            pnl = await ib.get_pnl_statistics()
+            
+            return {
+                'unrealized_pnl': pnl.unrealized_pnl,
+                'realized_pnl': pnl.realized_pnl,
+                'total_pnl': pnl.total_pnl,
+                'net_liquidation': pnl.net_liquidation,
+                'source': 'gateway'
+            }
+            
+    except Exception as e:
+        logger.error(f"IB Gateway 損益統計獲取失敗: {e}")
+        return {}
+
+
 # ========== API Endpoints ==========
 
 @app.get("/")
@@ -349,21 +490,59 @@ async def get_trades(
     end_date: Optional[date] = None,
     limit: int = 100
 ):
-    """取得交易記錄"""
-    trades = db.get_trades()
+    """取得交易記錄（根據 DATA_SOURCE 決定資料來源）"""
+    
+    # 檢查資料來源設定
+    data_source = _get_data_source()
+    
+    if data_source == 'GATEWAY':
+        # 從 IB Gateway 獲取交易（注意：只能獲取當日成交）
+        gateway_trades = await _fetch_trades_from_gateway()
+        # 合併資料庫的歷史交易
+        db_trades = db.get_trades()
+        # Gateway 交易優先，避免重複
+        gateway_symbols_time = {(t['symbol'], t['datetime'][:10]) for t in gateway_trades}
+        filtered_db = [t for t in db_trades if (t['symbol'], t['datetime'][:10]) not in gateway_symbols_time]
+        trades = gateway_trades + filtered_db
+    else:
+        trades = db.get_trades()
     
     # 過濾
     if symbol:
-        trades = [t for t in trades if t['symbol'] == symbol]
+        trades = [t for t in trades if t.get('symbol', '') == symbol]
     
     if start_date:
-        trades = [t for t in trades if datetime.fromisoformat(t['datetime']).date() >= start_date]
+        filtered = []
+        for t in trades:
+            try:
+                dt_str = t.get('datetime', '')
+                if len(dt_str) == 8:  # YYYYMMDD format
+                    trade_date = datetime.strptime(dt_str, '%Y%m%d').date()
+                else:
+                    trade_date = datetime.fromisoformat(dt_str.replace('Z', '')).date()
+                if trade_date >= start_date:
+                    filtered.append(t)
+            except:
+                continue
+        trades = filtered
     
     if end_date:
-        trades = [t for t in trades if datetime.fromisoformat(t['datetime']).date() <= end_date]
+        filtered = []
+        for t in trades:
+            try:
+                dt_str = t.get('datetime', '')
+                if len(dt_str) == 8:
+                    trade_date = datetime.strptime(dt_str, '%Y%m%d').date()
+                else:
+                    trade_date = datetime.fromisoformat(dt_str.replace('Z', '')).date()
+                if trade_date <= end_date:
+                    filtered.append(t)
+            except:
+                continue
+        trades = filtered
     
     # 排序（最新的在前）
-    trades = sorted(trades, key=lambda x: x['datetime'], reverse=True)[:limit]
+    trades = sorted(trades, key=lambda x: x.get('datetime', ''), reverse=True)[:limit]
     
     return [TradeResponse(**t) for t in trades]
 
@@ -488,10 +667,23 @@ async def get_equity_curve(
 
 @app.get("/api/portfolio", response_model=PortfolioOverviewResponse)
 async def get_portfolio():
-    """取得持倉總覽（基於 IBKR 持倉快照或交易記錄計算）"""
+    """取得持倉總覽（根據 DATA_SOURCE 決定資料來源）"""
     
-    # 先嘗試從資料庫取得最新持倉快照
-    positions_raw = db.get_latest_positions()
+    # 檢查資料來源設定
+    data_source = _get_data_source()
+    
+    if data_source == 'GATEWAY':
+        # 從 IB Gateway 獲取即時持倉
+        try:
+            positions_raw = await _fetch_positions_from_gateway()
+            logger.info(f"Portfolio 使用 GATEWAY 模式，獲取 {len(positions_raw)} 筆持倉")
+        except HTTPException:
+            # 連線失敗時 fallback 到 QUERY 模式
+            logger.warning("IB Gateway 連線失敗，fallback 到 QUERY 模式")
+            positions_raw = db.get_latest_positions()
+    else:
+        # 從資料庫取得持倉快照
+        positions_raw = db.get_latest_positions()
     
     # 始終計算交易記錄推導的持倉，用於補全遺漏的數據（例如 VIX 指數選擇權可能不在持倉快照中）
     calculated_positions = _calculate_positions_from_trades()
@@ -893,6 +1085,37 @@ async def sync_ibkr():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/gateway/sync", response_model=SyncResponse)
+async def sync_gateway():
+    """從 IB Gateway 同步持倉和交易到資料庫"""
+    try:
+        from jobs.gateway_sync import sync_gateway_to_database
+        
+        result = await sync_gateway_to_database(db)
+        
+        if not result['success']:
+            error_msg = ', '.join(result.get('errors', ['Unknown error']))
+            raise HTTPException(status_code=500, detail=f"Gateway 同步失敗: {error_msg}")
+        
+        # 重新計算 PnL
+        try:
+            pnl_calc = PnLCalculator(db)
+            pnl_calc.recalculate_all()
+        except Exception as e:
+            logger.warning(f"PnL 重新計算失敗: {e}")
+        
+        return SyncResponse(
+            success=True,
+            trades_synced=result.get('trades_synced', 0),
+            positions_synced=result.get('positions_synced', 0),
+            message=f"Gateway 同步完成: {result.get('positions_synced', 0)} 持倉, {result.get('trades_synced', 0)} 交易"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Gateway 同步 API 錯誤: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/api/ibkr/cash", response_model=CashBalanceResponse)
 async def get_cash_balance():
@@ -1040,13 +1263,20 @@ except Exception as e:
 scheduler = None
 
 async def send_daily_report_job():
-    """排程任務：發送每日戰情報告"""
+    """
+    排程任務：發送每日戰情報告
+    
+    功能：
+    1. 根據 DATA_SOURCE 設定從 QUERY 或 GATEWAY 獲取數據
+    2. 使用 AI 生成報告
+    3. 存檔為 Markdown 檔案
+    4. 發送到 Telegram
+    """
     try:
-        # 重新從資料庫獲取設定（因為這是排程任務，db session 應該要是新的或 thread-safe）
-        # 這裡假設 db 是全域變數且 thread-safe (TradingDatabase 使用 sqlite3，預設 check_same_thread=False)
-        
+        # 重新從資料庫獲取設定
         enabled = db.get_setting('telegram_enabled')
         if enabled != 'true':
+            logger.info("Telegram 未啟用，跳過報告發送")
             return
             
         token = db.get_setting('telegram_bot_token')
@@ -1056,31 +1286,34 @@ async def send_daily_report_job():
             logger.info("Telegram 未配置，跳過報告發送")
             return
 
-        # 0. 同步 IBKR 數據 (確保報告最新)
-        logger.info("正在同步 IBKR 數據...")
-        try:
-            flex_token = db.get_setting('ibkr_flex_token')
-            history_id = db.get_setting('ibkr_history_query_id')
-            positions_id = db.get_setting('ibkr_positions_query_id')
-            
-            if flex_token:
-                flex = IBKRFlexQuery(
-                    token=flex_token,
-                    history_query_id=history_id,
-                    positions_query_id=positions_id
-                )
-                # 執行同步
-                sync_result = flex.sync_to_database(db)
-                logger.info(f"IBKR 同步完成: {sync_result}")
-            else:
-                logger.warning("IBKR Token 未設定，跳過同步")
+        # 0. 檢查資料來源
+        data_source = _get_data_source()
+        logger.info(f"每日報告使用資料來源: {data_source}")
+
+        # 1. 同步資料 (QUERY 模式才需要同步 IBKR)
+        if data_source == 'QUERY':
+            logger.info("正在同步 IBKR 數據...")
+            try:
+                flex_token = db.get_setting('ibkr_flex_token')
+                history_id = db.get_setting('ibkr_history_query_id')
+                positions_id = db.get_setting('ibkr_positions_query_id')
                 
-        except Exception as e:
-            logger.error(f"IBKR 同步失敗 (繼續生成報告): {e}")
+                if flex_token:
+                    flex = IBKRFlexQuery(
+                        token=flex_token,
+                        history_query_id=history_id,
+                        positions_query_id=positions_id
+                    )
+                    sync_result = flex.sync_to_database(db)
+                    logger.info(f"IBKR 同步完成: {sync_result}")
+                else:
+                    logger.warning("IBKR Token 未設定，跳過同步")
+            except Exception as e:
+                logger.error(f"IBKR 同步失敗 (繼續生成報告): {e}")
 
         logger.info(f"開始生成每日報告... (Chat ID: {chat_id})")
         
-        # 確保 AI Coach 已初始化
+        # 2. 確保 AI Coach 已初始化
         global ai_coach
         if ai_coach is None:
             ai_coach = get_ai_coach()
@@ -1088,21 +1321,50 @@ async def send_daily_report_job():
         if ai_coach is None:
             logger.error("AI Coach 未配置，無法生成報告")
             return
+        
+        # 3. 使用 jobs 模組生成報告 (整合 Gateway 支援和檔案存檔)
+        try:
+            from jobs.daily_report import run_daily_report_job
             
-        # 重新實例化 ReportGenerator 以確保使用最新的 db 狀態
-        generator = ReportGenerator(db, ai_coach)
-        report_md = await generator.generate_daily_report()
-        
-        notifier = TelegramNotifier(token)
-        success = notifier.send_message(chat_id, report_md)
-        
-        if success:
-            logger.info("每日報告發送成功")
-        else:
-            logger.error("每日報告發送失敗")
+            result = await run_daily_report_job(
+                db=db,
+                ai_coach=ai_coach,
+                force_send=True  # 已通過上面的檢查，強制發送
+            )
+            
+            if result['success']:
+                logger.info(f"每日報告任務完成: {result['message']}")
+                if result.get('report_path'):
+                    logger.info(f"報告存檔: {result['report_path']}")
+            else:
+                logger.error(f"每日報告任務失敗: {result['message']}")
+                
+        except ImportError:
+            # Fallback: 使用舊的 ReportGenerator
+            logger.warning("jobs 模組未載入，使用備用方法")
+            generator = ReportGenerator(db, ai_coach)
+            report_md = await generator.generate_daily_report()
+            
+            # 存檔
+            try:
+                from services.file_service import save_report_to_markdown
+                from datetime import datetime
+                save_report_to_markdown(report_md, datetime.now().strftime('%Y-%m-%d'))
+            except Exception as e:
+                logger.error(f"存檔失敗: {e}")
+            
+            # 發送 Telegram
+            notifier = TelegramNotifier(token)
+            success = notifier.send_message(chat_id, report_md)
+            
+            if success:
+                logger.info("每日報告發送成功")
+            else:
+                logger.error("每日報告發送失敗")
             
     except Exception as e:
         logger.error(f"每日報告任務執行失敗: {e}")
+
 
 def update_scheduler_job():
     """根據設定更新排程任務"""
@@ -1143,12 +1405,48 @@ async def startup_event():
     global scheduler
     try:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
+        from apscheduler.triggers.interval import IntervalTrigger
+        
         scheduler = AsyncIOScheduler()
         scheduler.start()
         logger.info("Scheduler 已啟動")
         update_scheduler_job()
+        
+        # 添加 Gateway 定期同步任務（GATEWAY 模式下每小時同步一次）
+        data_source = _get_data_source()
+        if data_source == 'GATEWAY':
+            async def gateway_sync_job():
+                """Gateway 定期同步任務"""
+                try:
+                    from jobs.gateway_sync import sync_gateway_to_database
+                    result = await sync_gateway_to_database(db)
+                    if result['success']:
+                        logger.info(f"Gateway 定期同步完成: {result.get('positions_synced', 0)} 持倉, {result.get('trades_synced', 0)} 交易")
+                    else:
+                        logger.warning(f"Gateway 定期同步失敗: {result.get('errors', [])}")
+                except Exception as e:
+                    logger.error(f"Gateway 定期同步錯誤: {e}")
+            
+            scheduler.add_job(
+                gateway_sync_job,
+                IntervalTrigger(hours=1),
+                id='gateway_sync',
+                replace_existing=True
+            )
+            logger.info("已排程 Gateway 定期同步（每小時）")
+            
+            # 啟動時立即執行一次同步
+            try:
+                from jobs.gateway_sync import sync_gateway_to_database
+                result = await sync_gateway_to_database(db)
+                if result['success']:
+                    logger.info(f"啟動時 Gateway 同步完成: {result.get('positions_synced', 0)} 持倉, {result.get('trades_synced', 0)} 交易")
+            except Exception as e:
+                logger.warning(f"啟動時 Gateway 同步失敗: {e}")
+                
     except Exception as e:
         logger.error(f"Scheduler 初始化失敗: {e}")
+
 
 # ========== API Endpoints ==========
 
@@ -1252,6 +1550,20 @@ async def preview_daily_report():
         raise HTTPException(status_code=500, detail=f"生成報告失敗: {str(e)}")
 
 
+@app.get("/api/reports")
+async def list_reports(limit: int = 30):
+    """列出已存檔的報告"""
+    try:
+        from services.file_service import FileService
+        
+        file_service = FileService()
+        reports = file_service.list_reports(limit=limit)
+        return {"reports": reports}
+    except Exception as e:
+        logger.error(f"列出報告失敗: {e}")
+        return {"reports": []}
+
+
 # ========== 設定 ==========
 
 @app.get("/api/settings", response_model=SettingsResponse)
@@ -1300,6 +1612,11 @@ async def get_config_status():
     telegram_daily_time = _get_config("TELEGRAM_DAILY_TIME", "08:00")
     telegram_enabled = _get_config("TELEGRAM_ENABLED", "false") == "true"
     
+    # Data Source Config
+    current_data_source = _get_data_source()
+    ib_host = os.getenv('IB_HOST', '127.0.0.1')
+    ib_port = os.getenv('IB_PORT', '4001')
+    
     return {
         "ibkr": {
             "configured": bool(ibkr_token and ibkr_history_id),
@@ -1321,7 +1638,59 @@ async def get_config_status():
             "chat_id": telegram_chat_id,
             "daily_time": telegram_daily_time,
             "enabled": telegram_enabled
+        },
+        "data_source": {
+            "current": current_data_source,
+            "available": ["QUERY", "GATEWAY"],
+            "gateway_host": ib_host,
+            "gateway_port": ib_port
         }
+    }
+
+
+@app.get("/api/data-source")
+async def get_data_source_status():
+    """取得當前資料來源狀態"""
+    current = _get_data_source()
+    
+    # 測試 Gateway 連線狀態 (如果是 GATEWAY 模式)
+    gateway_status = "unknown"
+    if current == "GATEWAY":
+        try:
+            from services.ib_service import IBService
+            ib_host = os.getenv('IB_HOST', '127.0.0.1')
+            ib_port = int(os.getenv('IB_PORT', '4001'))
+            
+            async with IBService(host=ib_host, port=ib_port, client_id=99) as ib:
+                if ib.is_connected:
+                    gateway_status = "connected"
+                else:
+                    gateway_status = "disconnected"
+        except:
+            gateway_status = "error"
+    
+    return {
+        "current": current,
+        "gateway_status": gateway_status,
+        "available": ["QUERY", "GATEWAY"]
+    }
+
+
+@app.post("/api/data-source")
+async def set_data_source(request: dict):
+    """設定資料來源"""
+    source = request.get('source', '').upper()
+    
+    if source not in ['QUERY', 'GATEWAY']:
+        raise HTTPException(status_code=400, detail="資料來源必須是 QUERY 或 GATEWAY")
+    
+    # 儲存到資料庫
+    db.save_setting('data_source', source)
+    
+    return {
+        "success": True,
+        "message": f"資料來源已切換為 {source}",
+        "current": source
     }
 
 

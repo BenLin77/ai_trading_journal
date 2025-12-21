@@ -34,6 +34,12 @@ interface ConfigStatus {
     daily_time: string;
     enabled: boolean;
   };
+  data_source?: {
+    current: 'QUERY' | 'GATEWAY';
+    available: string[];
+    gateway_host: string;
+    gateway_port: string;
+  };
 }
 
 interface ValidationResult {
@@ -81,6 +87,10 @@ export default function SettingsPage() {
   const [ibkrValidation, setIbkrValidation] = useState<ValidationResult | null>(null);
   const [aiValidation, setAiValidation] = useState<ValidationResult | null>(null);
 
+  // 資料來源狀態
+  const [dataSource, setDataSource] = useState<'QUERY' | 'GATEWAY'>('QUERY');
+  const [isTestingGateway, setIsTestingGateway] = useState(false);
+
   // 取得設定狀態
   const { data: configStatus, isLoading } = useQuery<ConfigStatus>({
     queryKey: ['config-status'],
@@ -102,8 +112,37 @@ export default function SettingsPage() {
         setTelegramTime(configStatus.telegram.daily_time || '08:00');
         setTelegramEnabled(configStatus.telegram.enabled || false);
       }
+
+      if (configStatus.data_source) {
+        setDataSource(configStatus.data_source.current || 'QUERY');
+      }
     }
   }, [configStatus]);
+
+  // 切換資料來源
+  const switchDataSourceMutation = useMutation({
+    mutationFn: async (source: 'QUERY' | 'GATEWAY') => {
+      const response = await fetch('http://localhost:8000/api/data-source', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source }),
+      });
+      return response.json();
+    },
+    onSuccess: (data) => {
+      if (data.success) {
+        setDataSource(data.current);
+        setMessage({ type: 'success', text: data.message });
+        queryClient.invalidateQueries({ queryKey: ['config-status'] });
+      } else {
+        setMessage({ type: 'error', text: data.message || '切換失敗' });
+      }
+      setTimeout(() => setMessage(null), 3000);
+    },
+    onError: (error) => {
+      setMessage({ type: 'error', text: `切換失敗: ${error}` });
+    },
+  });
 
   // 驗證 IBKR
   const validateIbkrMutation = useMutation({
@@ -322,6 +361,82 @@ export default function SettingsPage() {
               {language === 'zh' ? '測試連線' : 'Test Connection'}
             </Button>
           </div>
+        </CardContent>
+      </Card>
+
+      {/* 資料來源設定 */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            🔄 {language === 'zh' ? '資料來源設定' : 'Data Source Configuration'}
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-gray-500">
+            {language === 'zh'
+              ? '選擇如何獲取持倉和交易數據。QUERY 模式透過 Flex Query API 取得歷史快照，GATEWAY 模式透過 IB Gateway 取得即時數據。'
+              : 'Choose how to fetch positions and trades. QUERY mode uses Flex Query API for historical snapshots, GATEWAY mode uses IB Gateway for real-time data.'}
+          </p>
+
+          <div className="flex gap-3">
+            <button
+              onClick={() => switchDataSourceMutation.mutate('QUERY')}
+              disabled={switchDataSourceMutation.isPending}
+              className={cn(
+                'flex-1 px-4 py-3 rounded-lg text-center transition-colors flex flex-col items-center gap-1',
+                dataSource === 'QUERY'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700'
+              )}
+            >
+              <span className="font-medium">📊 Flex Query</span>
+              <span className="text-xs opacity-80">{language === 'zh' ? '歷史資料' : 'Historical'}</span>
+            </button>
+            <button
+              onClick={() => switchDataSourceMutation.mutate('GATEWAY')}
+              disabled={switchDataSourceMutation.isPending}
+              className={cn(
+                'flex-1 px-4 py-3 rounded-lg text-center transition-colors flex flex-col items-center gap-1',
+                dataSource === 'GATEWAY'
+                  ? 'bg-emerald-600 text-white'
+                  : 'bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700'
+              )}
+            >
+              <span className="font-medium">⚡ IB Gateway</span>
+              <span className="text-xs opacity-80">{language === 'zh' ? '即時連線' : 'Real-time'}</span>
+            </button>
+          </div>
+
+          {configStatus?.data_source && (
+            <div className="text-sm text-gray-500 bg-gray-50 dark:bg-gray-800/50 p-3 rounded-lg">
+              <div className="flex items-center justify-between">
+                <span>{language === 'zh' ? '當前模式' : 'Current Mode'}:</span>
+                <span className={cn(
+                  'font-medium',
+                  dataSource === 'GATEWAY' ? 'text-emerald-600' : 'text-blue-600'
+                )}>
+                  {dataSource}
+                </span>
+              </div>
+              {dataSource === 'GATEWAY' && configStatus.data_source.gateway_host && (
+                <div className="flex items-center justify-between mt-1">
+                  <span>Gateway:</span>
+                  <span className="font-mono text-xs">
+                    {configStatus.data_source.gateway_host}:{configStatus.data_source.gateway_port}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {dataSource === 'GATEWAY' && (
+            <div className="p-3 bg-amber-50 dark:bg-amber-900/20 rounded-lg text-sm text-amber-800 dark:text-amber-200">
+              <AlertTriangle className="h-4 w-4 inline mr-2" />
+              {language === 'zh'
+                ? '請確保 IB Gateway 或 TWS 已在本地運行並允許 API 連接。'
+                : 'Make sure IB Gateway or TWS is running locally and API connections are enabled.'}
+            </div>
+          )}
         </CardContent>
       </Card>
 

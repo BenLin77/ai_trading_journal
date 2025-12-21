@@ -4,7 +4,9 @@
 
 import axios from 'axios';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+// 使用相對路徑，讓請求通過 nginx 代理到後端
+// 在開發環境中可以設定 NEXT_PUBLIC_API_URL 指向 localhost:8000
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
 export const api = axios.create({
   baseURL: API_BASE_URL,
@@ -573,6 +575,23 @@ export const apiClient = {
     const { data } = await api.get<{ success: boolean; report: string }>('/api/telegram/preview-daily-report');
     return data.report;
   },
+
+  // ========== 資料來源設定 ==========
+  async getDataSourceStatus() {
+    const { data } = await api.get<DataSourceStatus>('/api/data-source');
+    return data;
+  },
+
+  async setDataSource(source: 'QUERY' | 'GATEWAY') {
+    const { data } = await api.post<{ success: boolean; message: string; current: string }>('/api/data-source', { source });
+    return data;
+  },
+
+  // ========== 報告存檔列表 ==========
+  async listReports(limit: number = 30) {
+    const { data } = await api.get<{ reports: ReportFile[] }>('/api/reports', { params: { limit } });
+    return data.reports;
+  },
 };
 
 // ========== 新增的類型定義 ==========
@@ -761,3 +780,20 @@ export interface DailySummary {
   trade_count: number;
   total_pnl: number;
 }
+
+// 資料來源設定
+export interface DataSourceStatus {
+  current: 'QUERY' | 'GATEWAY';
+  gateway_status?: 'connected' | 'disconnected' | 'error' | 'unknown';
+  available: string[];
+}
+
+// 報告檔案
+export interface ReportFile {
+  filename: string;
+  path: string;
+  date: string;
+  size: number;
+  modified: string;
+}
+

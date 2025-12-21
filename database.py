@@ -679,6 +679,116 @@ class TradingDatabase:
         conn.close()
         return [dict(row) for row in rows]
 
+    def get_all_chat_sessions(self) -> List[Dict[str, Any]]:
+        """
+        取得所有對話會話列表（含統計資訊）
+        
+        Returns:
+            會話列表，每個包含 session_id, message_count, first_message, last_message
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT 
+                session_id,
+                COUNT(*) as message_count,
+                MIN(timestamp) as first_message,
+                MAX(timestamp) as last_message,
+                SUM(LENGTH(content)) as total_chars
+            FROM chat_history
+            GROUP BY session_id
+            ORDER BY last_message DESC
+        """)
+        
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+    
+    def get_chat_session_stats(self, session_id: str) -> Dict[str, Any]:
+        """
+        取得特定會話的統計資訊
+        
+        Args:
+            session_id: 會話 ID
+            
+        Returns:
+            統計資訊字典
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as message_count,
+                SUM(LENGTH(content)) as total_chars
+            FROM chat_history
+            WHERE session_id = ?
+        """, (session_id,))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        return {
+            'message_count': row['message_count'] if row else 0,
+            'total_chars': row['total_chars'] if row else 0
+        }
+    
+    def archive_chat_session(self, session_id: str, archive_path: str) -> bool:
+        """
+        將對話會話標記為已存檔
+        
+        Args:
+            session_id: 會話 ID
+            archive_path: 存檔路徑
+            
+        Returns:
+            True 如果成功
+        """
+        # 在 settings 中記錄存檔資訊
+        self.set_setting(f'chat_archive_{session_id}', archive_path)
+        return True
+    
+    def delete_old_chat_messages(self, session_id: str, keep_recent: int = 20) -> int:
+        """
+        刪除舊的對話訊息，保留最近 N 條
+        
+        Args:
+            session_id: 會話 ID
+            keep_recent: 保留最近的訊息數量
+            
+        Returns:
+            刪除的訊息數量
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        # 取得要保留的最舊訊息的 ID
+        cursor.execute("""
+            SELECT message_id FROM chat_history
+            WHERE session_id = ?
+            ORDER BY timestamp DESC
+            LIMIT 1 OFFSET ?
+        """, (session_id, keep_recent - 1))
+        
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return 0
+        
+        cutoff_id = row['message_id']
+        
+        # 刪除更舊的訊息
+        cursor.execute("""
+            DELETE FROM chat_history
+            WHERE session_id = ? AND message_id < ?
+        """, (session_id, cutoff_id))
+        
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return deleted
+
     def get_trade_statistics(self) -> Dict[str, Any]:
         """
         計算全局交易統計數據
