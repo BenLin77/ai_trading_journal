@@ -38,7 +38,7 @@ export function Sidebar() {
     <aside
       className={cn(
         'fixed left-0 top-16 z-40 h-[calc(100vh-4rem)] border-r border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-950 transition-all duration-300',
-        sidebarOpen ? 'w-64' : 'w-16'
+        sidebarOpen ? 'w-40' : 'w-16'
       )}
     >
       {/* Toggle Button */}

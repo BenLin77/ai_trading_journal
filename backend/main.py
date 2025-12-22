@@ -257,7 +257,12 @@ def _fetch_realtime_prices(underlyings: List[str]) -> Dict[str, float]:
     return prices
 
 def _calculate_positions_from_trades() -> List[Dict]:
-    """從交易記錄計算當前持倉"""
+    """從交易記錄計算當前持倉
+    
+    改進：正確處理做空倉位的成本計算
+    - 做多：BUY 開倉，成本 = 買入價格
+    - 做空：SELL 開倉，成本 = 賣出價格（這是做空的成本基礎）
+    """
     trades = db.get_trades()
     if not trades:
         return []
@@ -283,8 +288,10 @@ def _calculate_positions_from_trades() -> List[Dict]:
             positions_by_symbol[symbol] = {
                 'symbol': symbol,
                 'position': 0,
-                'total_cost': 0,
-                'buy_qty': 0,
+                'long_cost': 0,       # 做多成本（買入總額）
+                'long_qty': 0,        # 做多數量
+                'short_cost': 0,      # 做空成本（賣出總額）
+                'short_qty': 0,       # 做空數量
                 'asset_category': 'OPT' if t.get('instrument_type') == 'option' else 'STK',
                 'strike': t.get('strike'),
                 'expiry': t.get('expiry'),
@@ -293,23 +300,37 @@ def _calculate_positions_from_trades() -> List[Dict]:
         
         positions_by_symbol[symbol]['position'] += qty_change
         
-        # 計算平均成本（只計算買入）
+        # 分別記錄做多和做空的成本
         if qty_change > 0:
-            positions_by_symbol[symbol]['total_cost'] += qty_change * price
-            positions_by_symbol[symbol]['buy_qty'] += qty_change
+            # 買入（做多開倉或做空平倉）
+            positions_by_symbol[symbol]['long_cost'] += qty_change * price
+            positions_by_symbol[symbol]['long_qty'] += qty_change
+        else:
+            # 賣出（做多平倉或做空開倉）
+            positions_by_symbol[symbol]['short_cost'] += abs(qty_change) * price
+            positions_by_symbol[symbol]['short_qty'] += abs(qty_change)
     
     # 轉換為持倉列表（只保留有持倉的）
-    # 注意：價格更新由 get_portfolio() 中的 _fetch_realtime_prices() 統一處理
     result = []
     for symbol, pos in positions_by_symbol.items():
         if pos['position'] != 0:  # 有持倉
-            avg_cost = pos['total_cost'] / pos['buy_qty'] if pos['buy_qty'] > 0 else 0
+            position = pos['position']
+            
+            # 計算平均成本
+            # 做多倉位（position > 0）：使用買入成本
+            # 做空倉位（position < 0）：使用賣出成本
+            if position > 0:
+                # 做多：成本 = 買入總成本 / 買入總數量
+                avg_cost = pos['long_cost'] / pos['long_qty'] if pos['long_qty'] > 0 else 0
+            else:
+                # 做空：成本 = 賣出總成本 / 賣出總數量
+                avg_cost = pos['short_cost'] / pos['short_qty'] if pos['short_qty'] > 0 else 0
             
             parsed = parser.parse_symbol(symbol)
             
             result.append({
                 'symbol': symbol,
-                'position': pos['position'],
+                'position': position,
                 'mark_price': 0,  # 價格由 get_portfolio() 統一從 yfinance 獲取
                 'average_cost': avg_cost,
                 'unrealized_pnl': 0,  # 由 get_portfolio() 重新計算
@@ -1635,6 +1656,7 @@ async def get_config_status():
         "telegram": {
             "configured": bool(telegram_token and telegram_chat_id),
             "token_set": bool(telegram_token),
+            "token_preview": f"{telegram_token[:15]}...{telegram_token[-6:]}" if len(telegram_token) > 20 else "",
             "chat_id": telegram_chat_id,
             "daily_time": telegram_daily_time,
             "enabled": telegram_enabled
@@ -1729,7 +1751,7 @@ async def _validate_ibkr_config(request: ConfigValidationRequest) -> ConfigValid
     
     try:
         # Step 1: 請求報告
-        request_url = f"https://gdcdyn.interactivebrokers.com/Universal/servlet/FlexStatementService.SendRequest?t={token}&q={query_id}&v=3"
+        request_url = f"https://ndcdyn.interactivebrokers.com/Universal/servlet/FlexStatementService.SendRequest?t={token}&q={query_id}&v=3"
         response = requests.get(request_url, timeout=30)
         
         if response.status_code != 200:

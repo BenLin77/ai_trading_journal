@@ -1948,3 +1948,17 @@ class TradingDatabase:
             'trade_count': len(trades),
             'total_pnl': sum(t.get('realized_pnl', 0) for t in trades)
         }
+
+    def get_mfe_mae_records(self, limit: int = 20, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        取得 MFE/MAE 記錄
+        
+        Args:
+            limit: 限制返回筆數
+            symbol: 篩選標的
+            
+        Returns:
+            MFE/MAE 記錄列表（目前返回空列表，功能待實作）
+        """
+        # MFE/MAE 計算功能尚未完整實作，返回空列表
+        return []

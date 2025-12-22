@@ -222,7 +222,7 @@ class FlexQueryValidator:
 class IBKRFlexQuery:
     """IBKR Flex Query API 客戶端"""
 
-    BASE_URL = "https://gdcdyn.interactivebrokers.com/Universal/servlet"
+    BASE_URL = "https://ndcdyn.interactivebrokers.com/Universal/servlet"
 
     def __init__(
         self,
@@ -430,6 +430,8 @@ class IBKRFlexQuery:
         """
         解析交易記錄 CSV
         
+        支援 IBKR 多區段 CSV 格式（例如 Cash Report + Trades 混合）
+        
         Args:
             csv_content: Flex Query 回傳的 CSV
             
@@ -437,18 +439,50 @@ class IBKRFlexQuery:
             trades: 交易記錄列表
         """
         from io import StringIO
-        
-        try:
-            df = pd.read_csv(StringIO(csv_content))
-        except Exception as e:
-            raise Exception(f"CSV 解析失敗: {str(e)}")
+        import csv
         
         trades = []
+        lines = csv_content.strip().split('\n')
+        
+        # 找到 Trades 區段的 header（包含 AssetClass 和 TradeDate）
+        trades_header_idx = None
+        for i, line in enumerate(lines):
+            # 檢查是否為 Trades header（包含關鍵欄位）
+            if 'AssetClass' in line and 'TradeDate' in line and 'Quantity' in line:
+                trades_header_idx = i
+                break
+        
+        if trades_header_idx is None:
+            logger.warning("CSV 中找不到 Trades header，嘗試標準解析")
+            try:
+                df = pd.read_csv(StringIO(csv_content))
+                # 如果成功解析但沒有 TradeDate，可能不是 trades 資料
+                if 'TradeDate' not in df.columns:
+                    logger.info("CSV 不包含交易記錄（無 TradeDate 欄位）")
+                    return []
+            except Exception as e:
+                logger.error(f"CSV 標準解析失敗: {e}")
+                return []
+        else:
+            # 只取 Trades 區段的資料
+            trades_lines = lines[trades_header_idx:]
+            trades_csv = '\n'.join(trades_lines)
+            
+            try:
+                df = pd.read_csv(StringIO(trades_csv))
+            except Exception as e:
+                logger.error(f"Trades CSV 解析失敗: {e}")
+                return []
+        
+        logger.info(f"解析到 {len(df)} 筆交易記錄")
+        
         for _, row in df.iterrows():
             # 處理日期時間 - 使用安全解析
             date_time = None
             if 'Date/Time' in row:
                 date_time = safe_date_parse(row['Date/Time']) or str(row['Date/Time'])
+            elif 'DateTime' in row:
+                date_time = safe_date_parse(row['DateTime']) or str(row['DateTime'])
             elif 'TradeDate' in row:
                 trade_date = str(row['TradeDate'])
                 trade_time = str(row.get('TradeTime', ''))
@@ -469,7 +503,7 @@ class IBKRFlexQuery:
                 quantity = abs(quantity)
             
             trade_data = {
-                'symbol': str(row.get('Symbol', '')),
+                'symbol': str(row.get('Symbol', row.get('UnderlyingSymbol', ''))),
                 'date_time': date_time,
                 'quantity': quantity,
                 'price': safe_float(row.get('TradePrice', row.get('Price', 0)), 0, allow_negative=False),
@@ -486,6 +520,7 @@ class IBKRFlexQuery:
                 'underlying': str(row.get('UnderlyingSymbol', '')),
                 # 損益欄位（如果有）
                 'realized_pnl': safe_float(row.get('FifoPnlRealized', row.get('RealizedPnL', 0)), 0),
+                'open_close': str(row.get('Open/CloseIndicator', '')),
             }
             trades.append(trade_data)
         
@@ -1115,6 +1150,8 @@ class IBKRFlexQuery:
                         'quantity': abs(row['quantity']),
                         'price': row['price'],
                         'commission': abs(row.get('commission', 0)),
+                        # 使用 IBKR 返回的 FifoPnlRealized（這是準確的值）
+                        'realized_pnl': float(row.get('realized_pnl', 0) or 0),
                         'instrument_type': 'option' if row.get('asset_category') == 'OPT' else 'stock',
                         'strike': float(row['strike']) if row.get('strike') and row['strike'] != '' else None,
                         'expiry': row.get('expiry', ''),

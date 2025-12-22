@@ -54,11 +54,25 @@ class PnLCalculator:
             
         conn.close()
 
-    def recalculate_all(self):
-        """重新計算資料庫中所有交易的盈虧"""
+    def recalculate_all(self, force_recalc: bool = False):
+        """重新計算資料庫中交易的盈虧
+        
+        改進：預設不會覆蓋 IBKR 提供的 PnL 值
+        
+        Args:
+            force_recalc: 如果為 True，強制重算所有交易（覆蓋 IBKR 值）
+                          如果為 False（預設），只修復 multiplier 和其他屬性
+        """
         # 0. 先修復資料
         self.fix_missing_multipliers()
         
+        if not force_recalc:
+            # 不強制重算時，只修復 multipliers，不覆蓋 IBKR 的 PnL
+            import logging
+            logging.info("PnL recalculate skipped (using IBKR FifoPnlRealized values)")
+            return
+        
+        # 以下是強制重算的邏輯（正常情況下不會執行）
         # 1. 取得所有交易
         trades = self.db.get_trades()
         if not trades:

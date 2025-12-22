@@ -30,6 +30,7 @@ interface ConfigStatus {
   telegram?: {
     configured: boolean;
     token_set: boolean;
+    token_preview?: string;
     chat_id: string;
     daily_time: string;
     enabled: boolean;
@@ -108,7 +109,10 @@ export default function SettingsPage() {
       setAiProvider(configStatus.ai.provider || 'gemini');
 
       if (configStatus.telegram) {
-        setTelegramChatId(configStatus.telegram.chat_id || '');
+        // 如果 API 有設定 chat_id，設定到表單（只在初始化時設定）
+        if (configStatus.telegram.chat_id && !telegramChatId) {
+          setTelegramChatId(configStatus.telegram.chat_id);
+        }
         setTelegramTime(configStatus.telegram.daily_time || '08:00');
         setTelegramEnabled(configStatus.telegram.enabled || false);
       }
@@ -647,7 +651,7 @@ export default function SettingsPage() {
                 type={showTelegramToken ? 'text' : 'password'}
                 value={telegramToken}
                 onChange={(e) => setTelegramToken(e.target.value)}
-                placeholder={configStatus?.telegram?.token_set ? '••••••••••••' : 'Enter Telegram Bot Token'}
+                placeholder={configStatus?.telegram?.token_preview || (configStatus?.telegram?.token_set ? '••••••••••••' : 'Enter Telegram Bot Token')}
                 className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 pr-10"
               />
               <button
