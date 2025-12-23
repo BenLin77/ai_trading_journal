@@ -67,9 +67,33 @@ class MFEMAECalculator:
         # 從緩存取得 OHLC 數據
         ohlc_data = self.db.get_ohlc_cache(symbol, start_date=entry_date, end_date=exit_date)
 
+        # 如果緩存沒有數據，嘗試從 yfinance 抓取
+        if not ohlc_data:
+            ohlc_data = self._fetch_and_cache_ohlc(symbol, entry_date, exit_date)
+
         if not ohlc_data:
             logger.warning(f"No OHLC data found for {symbol} from {entry_date} to {exit_date}")
             return self._empty_result(trade_id, symbol, entry_date, entry_price)
+
+        # 驗證 OHLC 數據與進場價是否一致（檢測拆股/數據異常）
+        all_lows = [d['low'] for d in ohlc_data]
+        all_highs = [d['high'] for d in ohlc_data]
+        min_low = min(all_lows)
+        max_high = max(all_highs)
+        
+        # 如果進場價與 OHLC 範圍差異過大（超過 200%），可能是數據問題
+        price_range_check = False
+        if min_low > 0 and max_high > 0:
+            # 檢查進場價是否在 OHLC 範圍的合理區間內（允許 2x 誤差）
+            if entry_price < min_low / 2 or entry_price > max_high * 2:
+                logger.warning(f"Price mismatch for {symbol}: entry_price={entry_price}, OHLC range=[{min_low}, {max_high}]. Possible stock split or data issue.")
+                price_range_check = True
+        
+        if price_range_check:
+            # 數據不一致，返回帶有警告標記的結果
+            result = self._empty_result(trade_id, symbol, entry_date, entry_price)
+            result['data_warning'] = 'price_mismatch'
+            return result
 
         # 計算 MFE 和 MAE
         mfe, mfe_price, mfe_date = self._calculate_mfe(ohlc_data, entry_price, direction)
@@ -200,6 +224,76 @@ class MFEMAECalculator:
             return date_str[:10]
 
         return date_str
+
+    def _fetch_and_cache_ohlc(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str
+    ) -> List[Dict[str, Any]]:
+        """
+        從 yfinance 抓取 OHLC 數據並存入緩存
+        
+        Args:
+            symbol: 股票代號
+            start_date: 開始日期 (YYYY-MM-DD)
+            end_date: 結束日期 (YYYY-MM-DD)
+            
+        Returns:
+            OHLC 數據列表
+        """
+        try:
+            import yfinance as yf
+            
+            # 處理特殊的 symbol (指數需要加上 ^ 前綴)
+            yf_symbol = symbol
+            index_symbols = ['VIX', 'SPX', 'NDX', 'DJI', 'RUT', 'IXIC', 'GSPC']
+            if symbol.upper() in index_symbols:
+                yf_symbol = f'^{symbol.upper()}'
+            elif symbol.upper().startswith('VIX'):
+                yf_symbol = '^VIX'
+            
+            logger.info(f"Fetching OHLC data from yfinance for {yf_symbol} ({start_date} to {end_date})")
+            
+            ticker = yf.Ticker(yf_symbol)
+            # 多抓一些日期以確保覆蓋範圍（yfinance 的 start 是包含的，end 是不包含的）
+            hist = ticker.history(start=start_date, end=end_date)
+            
+            if hist.empty:
+                # 嘗試用 period 參數
+                hist = ticker.history(period='2y')
+                
+            if hist.empty:
+                logger.warning(f"No data returned from yfinance for {yf_symbol}")
+                return []
+            
+            ohlc_data = []
+            for idx, row in hist.iterrows():
+                ohlc_data.append({
+                    "date": idx.strftime('%Y-%m-%d'),
+                    "open": round(row['Open'], 2),
+                    "high": round(row['High'], 2),
+                    "low": round(row['Low'], 2),
+                    "close": round(row['Close'], 2),
+                    "volume": int(row['Volume'])
+                })
+            
+            # 保存到緩存
+            if ohlc_data:
+                saved_count = self.db.save_ohlc_data(symbol, ohlc_data)
+                logger.info(f"Cached {saved_count} OHLC records for {symbol}")
+            
+            # 過濾出請求的日期範圍
+            filtered_data = [
+                d for d in ohlc_data 
+                if start_date <= d['date'] <= end_date
+            ]
+            
+            return filtered_data
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch OHLC from yfinance for {symbol}: {e}")
+            return []
 
     def _empty_result(
         self,

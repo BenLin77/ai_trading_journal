@@ -1401,8 +1401,8 @@ def update_scheduler_job():
         # 清除舊任務
         scheduler.remove_all_jobs()
         
-        enabled = db.get_setting('telegram_enabled')
-        daily_time = db.get_setting('telegram_daily_time')  # "HH:MM"
+        enabled = db.get_setting('TELEGRAM_ENABLED')
+        daily_time = db.get_setting('TELEGRAM_DAILY_TIME')  # "HH:MM"
         
         if enabled == 'true' and daily_time:
             try:
@@ -1410,12 +1410,18 @@ def update_scheduler_job():
                 # 設定為台灣時間 (Asia/Taipei)
                 tz = pytz.timezone('Asia/Taipei')
                 
+                # 只在工作日（週一到週五）發送，週末不發送
                 scheduler.add_job(
                     send_daily_report_job,
-                    CronTrigger(hour=hour, minute=minute, timezone=tz),
+                    CronTrigger(
+                        hour=hour, 
+                        minute=minute, 
+                        day_of_week='mon-fri',  # 只在工作日執行
+                        timezone=tz
+                    ),
                     id='daily_report'
                 )
-                logger.info(f"已排程每日報告: {daily_time} (Asia/Taipei)")
+                logger.info(f"已排程每日報告: {daily_time} (Asia/Taipei, 週一到週五)")
             except ValueError:
                 logger.error(f"時間格式錯誤: {daily_time}")
     except Exception as e:
@@ -1476,9 +1482,17 @@ async def test_telegram(request: dict):
     """測試 Telegram 發送"""
     token = request.get('token')
     chat_id = request.get('chat_id')
+    use_saved = request.get('use_saved', False)
+    
+    # 如果設定 use_saved，從資料庫或環境變數讀取
+    if use_saved or (not token and not chat_id):
+        token = _get_config('TELEGRAM_BOT_TOKEN', '')
+        chat_id = _get_config('TELEGRAM_CHAT_ID', '')
+        if token and chat_id:
+            logger.info("使用已儲存的 Telegram 設定進行測試")
     
     if not token or not chat_id:
-        return {"success": False, "message": "請提供 Token 和 Chat ID"}
+        return {"success": False, "message": "請提供 Token 和 Chat ID，或確認已在 .env 或設定中設定"}
         
     try:
         notifier = TelegramNotifier(token)
@@ -1486,7 +1500,7 @@ async def test_telegram(request: dict):
         success = notifier.send_message(chat_id, message)
         
         if success:
-            return {"success": True, "message": "發送成功"}
+            return {"success": True, "message": "發送成功！訊息已傳送到 Telegram"}
         else:
             return {"success": False, "message": "發送失敗，請檢查 Token 或 Chat ID"}
     except Exception as e:
@@ -1657,7 +1671,9 @@ async def get_config_status():
             "configured": bool(telegram_token and telegram_chat_id),
             "token_set": bool(telegram_token),
             "token_preview": f"{telegram_token[:15]}...{telegram_token[-6:]}" if len(telegram_token) > 20 else "",
-            "chat_id": telegram_chat_id,
+            "chat_id_set": bool(telegram_chat_id),
+            "chat_id": telegram_chat_id,  # 完整 chat_id (用於前端測試按鈕)
+            "chat_id_preview": f"{telegram_chat_id[:4]}{'*' * max(0, len(telegram_chat_id) - 4)}" if telegram_chat_id else "",
             "daily_time": telegram_daily_time,
             "enabled": telegram_enabled
         },

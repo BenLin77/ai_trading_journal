@@ -96,7 +96,7 @@ export default function SettingsPage() {
   const { data: configStatus, isLoading } = useQuery<ConfigStatus>({
     queryKey: ['config-status'],
     queryFn: async () => {
-      const response = await fetch('http://localhost:8000/api/config/status');
+      const response = await fetch('/api/config/status');
       return response.json();
     },
   });
@@ -126,7 +126,7 @@ export default function SettingsPage() {
   // 切換資料來源
   const switchDataSourceMutation = useMutation({
     mutationFn: async (source: 'QUERY' | 'GATEWAY') => {
-      const response = await fetch('http://localhost:8000/api/data-source', {
+      const response = await fetch('/api/data-source', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ source }),
@@ -151,7 +151,7 @@ export default function SettingsPage() {
   // 驗證 IBKR
   const validateIbkrMutation = useMutation({
     mutationFn: async () => {
-      const response = await fetch('http://localhost:8000/api/config/validate', {
+      const response = await fetch('/api/config/validate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -172,7 +172,7 @@ export default function SettingsPage() {
     mutationFn: async () => {
       const token = aiProvider === 'gemini' ? geminiKey :
         aiProvider === 'deepseek' ? deepseekKey : openaiKey;
-      const response = await fetch('http://localhost:8000/api/config/validate', {
+      const response = await fetch('/api/config/validate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -190,7 +190,7 @@ export default function SettingsPage() {
   // 儲存設定
   const saveMutation = useMutation({
     mutationFn: async () => {
-      const response = await fetch('http://localhost:8000/api/config/save', {
+      const response = await fetch('/api/config/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -672,9 +672,17 @@ export default function SettingsPage() {
               type="text"
               value={telegramChatId}
               onChange={(e) => setTelegramChatId(e.target.value)}
-              placeholder="Chat ID (e.g. 123456789)"
+              placeholder={configStatus?.telegram?.chat_id ?
+                `${configStatus.telegram.chat_id.slice(0, 4)}${'*'.repeat(Math.max(0, configStatus.telegram.chat_id.length - 4))}` :
+                'Chat ID (e.g. 123456789)'}
               className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800"
             />
+            {configStatus?.telegram?.chat_id && !telegramChatId && (
+              <p className="text-xs text-emerald-600 dark:text-emerald-400 mt-1 flex items-center gap-1">
+                <CheckCircle className="h-3 w-3" />
+                {language === 'zh' ? '已從設定讀取 (部分遮罩)' : 'Loaded from config (partially masked)'}
+              </p>
+            )}
           </div>
 
           <div>
@@ -690,25 +698,42 @@ export default function SettingsPage() {
             />
           </div>
 
+          {/* 狀態提示 */}
+          {configStatus?.telegram?.configured && (
+            <div className="p-3 bg-emerald-50 dark:bg-emerald-900/20 rounded-lg text-sm text-emerald-800 dark:text-emerald-200 flex items-center gap-2">
+              <CheckCircle className="h-4 w-4" />
+              {language === 'zh' ? 'Telegram 已設定完成。您可以直接測試發送，或輸入新的值來覆蓋設定。' : 'Telegram is configured. You can test or enter new values to override.'}
+            </div>
+          )}
+
           {/* 測試按鈕 */}
           <div className="flex gap-2 mt-4">
             <Button
               type="button"
               onClick={() => {
-                fetch('http://localhost:8000/api/telegram/test', {
+                // 如果使用者有輸入新值，使用新值；否則使用 'use_saved' 標記讓後端使用已儲存的值
+                const useNewToken = telegramToken || undefined;
+                const useNewChatId = telegramChatId || undefined;
+                const useSaved = !telegramToken && !telegramChatId && configStatus?.telegram?.configured;
+
+                fetch('/api/telegram/test', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ token: telegramToken, chat_id: telegramChatId })
+                  body: JSON.stringify({
+                    token: useNewToken,
+                    chat_id: useNewChatId,
+                    use_saved: useSaved
+                  })
                 }).then(res => res.json()).then(data => {
                   setMessage({ type: data.success ? 'success' : 'error', text: data.message });
-                  setTimeout(() => setMessage(null), 3000);
+                  setTimeout(() => setMessage(null), 5000);
                 }).catch(err => {
                   setMessage({ type: 'error', text: '請求失敗: ' + err });
                   setTimeout(() => setMessage(null), 3000);
                 });
               }}
               variant="secondary"
-              disabled={!telegramToken || !telegramChatId}
+              disabled={(!telegramToken || !telegramChatId) && !configStatus?.telegram?.configured}
             >
               <Send className="h-4 w-4 mr-2" />
               {language === 'zh' ? '測試發送' : 'Test Send'}
