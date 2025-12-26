@@ -23,7 +23,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       root.style.colorScheme = 'light';
     }
 
-    console.log('Theme applied:', theme, 'Classes:', root.className);
+    // 生產環境不輸出 console.log
   }, [theme]);
 
   return <>{children}</>;

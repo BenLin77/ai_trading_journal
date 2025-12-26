@@ -15,6 +15,20 @@ const inter = Inter({
 export const metadata: Metadata = {
   title: "AI Trading Journal",
   description: "Smart Trading Journal System - AI-Powered Trade Review & Performance Analysis",
+  // 安全措施 #4: 禁止搜尋引擎索引（這是私人交易日誌系統）
+  robots: {
+    index: false,
+    follow: false,
+    nocache: true,
+    googleBot: {
+      index: false,
+      follow: false,
+    },
+  },
+  // 額外的安全設定
+  other: {
+    'X-Robots-Tag': 'noindex, nofollow, noarchive',
+  },
 };
 
 export default function RootLayout({

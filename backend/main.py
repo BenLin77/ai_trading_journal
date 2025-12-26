@@ -4,6 +4,11 @@ AI Trading Journal - FastAPI Backend
 提供 REST API 給 React 前端使用
 """
 
+# 必須在任何 asyncio 相關的 import 之前應用 nest_asyncio
+# 這是解決 ib_insync 與 FastAPI/APScheduler 事件循環衝突的關鍵
+import nest_asyncio
+nest_asyncio.apply()
+
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -35,19 +40,40 @@ from dotenv import load_dotenv
 # 載入父目錄的 .env 檔案
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
 
+# 判斷是否為生產環境
+IS_PRODUCTION = os.getenv('NODE_ENV', 'development') == 'production' or \
+                os.getenv('ENVIRONMENT', 'development') == 'production'
+
+# FastAPI 配置（安全措施 #2: 生產環境禁用 API 文檔）
 app = FastAPI(
     title="AI Trading Journal API",
     description="交易日誌系統 API",
-    version="2.0.0"
+    version="2.0.0",
+    # 生產環境禁用 Swagger UI 和 ReDoc
+    docs_url=None if IS_PRODUCTION else "/docs",
+    redoc_url=None if IS_PRODUCTION else "/redoc",
+    openapi_url=None if IS_PRODUCTION else "/openapi.json",
 )
 
-# CORS 設定
+# CORS 設定（安全措施 #7）
+allowed_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+# 生產環境只允許正式網域
+if IS_PRODUCTION:
+    allowed_origins = [
+        "https://journal.gamma-level.cc",
+        "https://www.journal.gamma-level.cc",
+    ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
 )
 
 # 資料庫實例 - 使用父目錄的資料庫
@@ -1294,14 +1320,14 @@ async def send_daily_report_job():
     4. 發送到 Telegram
     """
     try:
-        # 重新從資料庫獲取設定
-        enabled = db.get_setting('telegram_enabled')
+        # 從環境變數或資料庫獲取設定
+        enabled = _get_config('TELEGRAM_ENABLED', 'false')
         if enabled != 'true':
-            logger.info("Telegram 未啟用，跳過報告發送")
+            logger.info(f"Telegram 未啟用 (enabled={enabled})，跳過報告發送")
             return
             
-        token = db.get_setting('telegram_bot_token')
-        chat_id = db.get_setting('telegram_chat_id')
+        token = _get_config('TELEGRAM_BOT_TOKEN')
+        chat_id = _get_config('TELEGRAM_CHAT_ID')
         
         if not token or not chat_id:
             logger.info("Telegram 未配置，跳過報告發送")
@@ -1315,9 +1341,9 @@ async def send_daily_report_job():
         if data_source == 'QUERY':
             logger.info("正在同步 IBKR 數據...")
             try:
-                flex_token = db.get_setting('ibkr_flex_token')
-                history_id = db.get_setting('ibkr_history_query_id')
-                positions_id = db.get_setting('ibkr_positions_query_id')
+                flex_token = _get_config('IBKR_FLEX_TOKEN')
+                history_id = _get_config('IBKR_HISTORY_QUERY_ID')
+                positions_id = _get_config('IBKR_POSITIONS_QUERY_ID')
                 
                 if flex_token:
                     flex = IBKRFlexQuery(

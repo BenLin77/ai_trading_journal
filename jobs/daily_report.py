@@ -22,6 +22,29 @@ MAX_RETRY_ATTEMPTS = 3
 RETRY_DELAY_MINUTES = 30
 
 
+def _create_minimal_report_context():
+    """
+    創建一個最小的報告上下文
+    
+    當 Gateway 和資料庫都無法取得數據時使用，
+    確保用戶至少收到一個通知。
+    """
+    from services.report_data_service import ReportContext
+    
+    return ReportContext(
+        report_date=datetime.now().strftime('%Y-%m-%d'),
+        portfolio_summary=[],
+        yesterday_trades=[],
+        pnl_statistics={
+            'unrealizedPnL': 0,
+            'realizedPnL': 0,
+            'totalPnL': 0,
+            'netLiquidation': 0
+        },
+        data_source='FALLBACK'
+    )
+
+
 async def run_daily_report_job(
     db=None,
     ai_coach=None,
@@ -51,14 +74,19 @@ async def run_daily_report_job(
     try:
         # 0. 檢查 Telegram 設定
         if not force_send:
-            enabled = db.get_setting('telegram_enabled') if db else None
+            enabled = (db.get_setting('TELEGRAM_ENABLED') or db.get_setting('telegram_enabled')) if db else os.getenv('TELEGRAM_ENABLED', 'false')
             if enabled != 'true':
                 result['message'] = 'Telegram 通知未啟用'
                 logger.info(result['message'])
                 return result
                 
-        token = db.get_setting('telegram_bot_token') if db else os.getenv('TELEGRAM_BOT_TOKEN')
-        chat_id = db.get_setting('telegram_chat_id') if db else os.getenv('TELEGRAM_CHAT_ID')
+        token = (db.get_setting('TELEGRAM_BOT_TOKEN') or db.get_setting('telegram_bot_token')) if db else None
+        if not token:
+            token = os.getenv('TELEGRAM_BOT_TOKEN')
+            
+        chat_id = (db.get_setting('TELEGRAM_CHAT_ID') or db.get_setting('telegram_chat_id')) if db else None
+        if not chat_id:
+            chat_id = os.getenv('TELEGRAM_CHAT_ID')
         
         # 1. 獲取數據來源設定
         data_source = os.getenv('DATA_SOURCE', 'QUERY').upper()
@@ -68,26 +96,35 @@ async def run_daily_report_job(
         from services.report_data_service import ReportDataService
         
         data_service = ReportDataService(db=db)
+        context = None
         
         try:
             context = await data_service.generate_daily_report_context()
             logger.info(f"數據獲取成功: {len(context.portfolio_summary)} 持倉, {len(context.yesterday_trades)} 交易")
         except ConnectionError as e:
-            # Gateway 模式連線失敗：安排重試
-            if data_source == 'GATEWAY' and retry_count < MAX_RETRY_ATTEMPTS:
-                logger.warning(f"IB Gateway 連線失敗，{RETRY_DELAY_MINUTES} 分鐘後重試 ({retry_count + 1}/{MAX_RETRY_ATTEMPTS})")
-                result['message'] = f"IB Gateway 連線失敗，將於 {RETRY_DELAY_MINUTES} 分鐘後重試"
+            # Gateway 模式連線失敗：嘗試 Fallback 到資料庫
+            if data_source == 'GATEWAY':
+                logger.warning(f"IB Gateway 連線失敗: {e}")
+                logger.info("嘗試 Fallback 到資料庫數據...")
                 
-                # 排程重試
-                await asyncio.sleep(RETRY_DELAY_MINUTES * 60)
-                return await run_daily_report_job(
-                    db=db,
-                    ai_coach=ai_coach,
-                    force_send=force_send,
-                    retry_count=retry_count + 1
-                )
+                try:
+                    # 強制使用 QUERY 模式從資料庫獲取數據
+                    fallback_service = ReportDataService(db=db)
+                    fallback_service._data_source = 'QUERY'  # 強制使用資料庫
+                    context = await fallback_service.generate_daily_report_context()
+                    logger.info(f"Fallback 成功: {len(context.portfolio_summary)} 持倉, {len(context.yesterday_trades)} 交易 (來自資料庫)")
+                except Exception as fallback_error:
+                    logger.error(f"Fallback 到資料庫也失敗: {fallback_error}")
+                    # 如果資料庫也沒有數據，嘗試生成一個最小報告
+                    context = _create_minimal_report_context()
+                    logger.warning("使用最小報告上下文")
             else:
                 raise
+        except Exception as e:
+            logger.error(f"數據獲取失敗: {e}")
+            # 嘗試使用最小報告
+            context = _create_minimal_report_context()
+            logger.warning("使用最小報告上下文")
         
         # 3. 生成 AI 報告
         report_md = await _generate_ai_report(context, ai_coach, db)
@@ -165,9 +202,15 @@ async def _generate_ai_report(context, ai_coach, db=None) -> Optional[str]:
     """
     import json
     
+    # 檢查是否為 FALLBACK 模式（無數據可用）
+    if context.data_source == 'FALLBACK':
+        logger.warning("使用 FALLBACK 模式，生成簡化報告")
+        return _generate_fallback_report(context)
+    
     if not ai_coach:
         logger.error("AI Coach 未設定")
-        return None
+        # 如果 AI 不可用，生成一個基本報告
+        return _generate_basic_report(context)
         
     # 構建 AI Prompt (使用用戶提供的專業 prompt)
     prompt = _build_trading_coach_prompt(context, db)
@@ -178,7 +221,80 @@ async def _generate_ai_report(context, ai_coach, db=None) -> Optional[str]:
         return report
     except Exception as e:
         logger.error(f"AI 生成報告失敗: {e}")
-        return None
+        # AI 失敗時，生成基本報告
+        return _generate_basic_report(context)
+
+
+def _generate_fallback_report(context) -> str:
+    """生成 FALLBACK 模式的簡化報告"""
+    return f"""**每日倉位總結** - {context.report_date}
+
+⚠️ **注意**: 今日報告數據取得失敗
+
+**可能原因**:
+- IB Gateway 未連線或已斷開
+- 資料庫中無最新持倉數據
+- 今日為非交易日（週末/假日）
+
+**建議操作**:
+1. 檢查 IB Gateway 連線狀態
+2. 手動執行一次同步
+3. 如果問題持續，請檢查系統日誌
+
+---
+*此訊息由系統自動發送*
+"""
+
+
+def _generate_basic_report(context) -> str:
+    """生成基本報告（AI 不可用時）"""
+    report_date = context.report_date
+    portfolio = context.portfolio_summary
+    trades = context.yesterday_trades
+    pnl = context.pnl_statistics
+    
+    lines = [f"**每日倉位總結** - {report_date}", ""]
+    
+    # 損益摘要
+    lines.append("**損益總覽**")
+    lines.append(f"- 未實現損益: ${pnl.get('unrealizedPnL', 0):,.2f}")
+    lines.append(f"- 已實現損益: ${pnl.get('realizedPnL', 0):,.2f}")
+    lines.append(f"- 總損益: ${pnl.get('totalPnL', 0):,.2f}")
+    lines.append("")
+    
+    # 持倉列表
+    if portfolio:
+        lines.append(f"**當前持倉** ({len(portfolio)} 筆)")
+        for pos in portfolio[:10]:  # 限制顯示前 10 筆
+            symbol = pos.get('symbol', 'N/A')
+            qty = pos.get('quantity', 0)
+            pnl_val = pos.get('unrealized_pnl', 0)
+            lines.append(f"- {symbol}: {qty} @ ${pnl_val:+,.2f}")
+        if len(portfolio) > 10:
+            lines.append(f"- ... 及其他 {len(portfolio) - 10} 筆持倉")
+    else:
+        lines.append("**當前持倉**: 無")
+    lines.append("")
+    
+    # 昨日交易
+    if trades:
+        lines.append(f"**昨日交易** ({len(trades)} 筆)")
+        for trade in trades[:5]:
+            symbol = trade.get('symbol', 'N/A')
+            side = trade.get('side', 'N/A')
+            qty = trade.get('quantity', 0)
+            price = trade.get('price', 0)
+            lines.append(f"- {symbol}: {side} {qty} @ ${price:.2f}")
+        if len(trades) > 5:
+            lines.append(f"- ... 及其他 {len(trades) - 5} 筆交易")
+    else:
+        lines.append("**昨日交易**: 無")
+    
+    lines.append("")
+    lines.append("---")
+    lines.append("*此報告為基本模式（AI 服務暫時不可用）*")
+    
+    return "\n".join(lines)
 
 
 def _build_trading_coach_prompt(context, db=None) -> str:

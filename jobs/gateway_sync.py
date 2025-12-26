@@ -23,6 +23,8 @@ async def sync_gateway_to_database(db) -> Dict[str, Any]:
     """
     從 IB Gateway 同步數據到資料庫
     
+    使用同步方式獲取數據以避免事件循環衝突。
+    
     Args:
         db: TradingDatabase 實例
         
@@ -37,78 +39,76 @@ async def sync_gateway_to_database(db) -> Dict[str, Any]:
     }
     
     try:
-        from services.ib_service import IBService
+        from services.ib_service import get_ib_data_sync
         import os
         
         ib_host = os.getenv('IB_HOST', '127.0.0.1')
         ib_port = int(os.getenv('IB_PORT', '4001'))
-        ib_client_id = int(os.getenv('IB_CLIENT_ID', '10'))  # 使用不同的 client_id 避免衝突
+        ib_client_id = int(os.getenv('IB_CLIENT_ID', '10'))
         
         logger.info(f"開始 Gateway 同步... (連接 {ib_host}:{ib_port})")
         
-        async with IBService(host=ib_host, port=ib_port, client_id=ib_client_id) as ib:
-            # 1. 同步持倉
-            positions = await ib.get_portfolio_summary()
+        # 使用同步函數獲取數據（避免事件循環衝突）
+        ib_data = get_ib_data_sync(host=ib_host, port=ib_port, client_id=ib_client_id)
+        
+        if not ib_data['success']:
+            raise ConnectionError(ib_data.get('error', '未知錯誤'))
+        
+        # 1. 同步持倉
+        if ib_data['portfolio']:
+            positions_data = []
+            for p in ib_data['portfolio']:
+                positions_data.append({
+                    'symbol': p['symbol'],
+                    'underlying': p['symbol'],
+                    'position': p['position'],
+                    'mark_price': p['market_price'],
+                    'average_cost': p['avg_cost'],
+                    'unrealized_pnl': p['unrealized_pnl'],
+                    'realized_pnl': 0,
+                    'asset_category': 'STK',
+                    'strike': None,
+                    'expiry': None,
+                    'put_call': None,
+                    'multiplier': 100,
+                })
             
-            if positions:
-                positions_data = []
-                for p in positions:
-                    positions_data.append({
-                        'symbol': p.symbol,
-                        'underlying': p.underlying,
-                        'position': p.quantity,
-                        'mark_price': p.market_price,
-                        'average_cost': p.avg_cost,
-                        'unrealized_pnl': p.unrealized_pnl,
-                        'realized_pnl': p.realized_pnl,
-                        'asset_category': p.asset_category,
-                        'strike': p.strike,
-                        'expiry': p.expiry,
-                        'put_call': p.put_call,
-                        'multiplier': p.multiplier or 100,
-                    })
-                
-                # 存入資料庫
-                count = db.upsert_open_positions(positions_data)
-                result['positions_synced'] = count
-                logger.info(f"同步 {count} 筆持倉到資料庫")
+            count = db.upsert_open_positions(positions_data)
+            result['positions_synced'] = count
+            logger.info(f"同步 {count} 筆持倉到資料庫")
+        
+        # 2. 同步交易記錄
+        trades_added = 0
+        for t in ib_data['trades']:
+            trade_data = {
+                'datetime': t['time'],
+                'symbol': t['symbol'],
+                'action': 'BUY' if t['side'] == 'BOT' else 'SELL',
+                'quantity': abs(t['quantity']),
+                'price': t['price'],
+                'commission': 0,
+                'realized_pnl': 0,
+                'instrument_type': 'stock',
+                'underlying': t['symbol'],
+            }
             
-            # 2. 同步交易記錄
-            trades = await ib.get_yesterday_trades()
-            
-            trades_added = 0
-            for t in trades:
-                trade_data = {
-                    'datetime': t.time.strftime('%Y%m%d;%H%M%S') if hasattr(t.time, 'strftime') else str(t.time),
-                    'symbol': t.symbol,
-                    'action': t.side,
-                    'quantity': abs(t.quantity),
-                    'price': t.price,
-                    'commission': t.commission,
-                    'realized_pnl': t.realized_pnl,
-                    'instrument_type': 'option' if t.asset_category == 'OPT' else 'stock',
-                    'underlying': t.underlying,
-                }
-                
-                # add_trade 會自動避免重複
-                if db.add_trade(trade_data):
-                    trades_added += 1
-            
-            result['trades_synced'] = trades_added
-            if trades_added > 0:
-                logger.info(f"同步 {trades_added} 筆新交易到資料庫")
-            
-            # 3. 同步帳戶損益統計（可選：存為現金快照）
-            try:
-                pnl_stats = await ib.get_pnl_statistics()
-                db.upsert_cash_snapshot(
-                    total_cash=pnl_stats.net_liquidation,
-                    total_settled_cash=pnl_stats.net_liquidation,
-                    currency='USD'
-                )
-                logger.info(f"同步帳戶淨值: ${pnl_stats.net_liquidation:,.2f}")
-            except Exception as e:
-                logger.warning(f"同步帳戶統計失敗: {e}")
+            if db.add_trade(trade_data):
+                trades_added += 1
+        
+        result['trades_synced'] = trades_added
+        if trades_added > 0:
+            logger.info(f"同步 {trades_added} 筆新交易到資料庫")
+        
+        # 3. 同步帳戶損益統計
+        if ib_data['pnl']:
+            pnl = ib_data['pnl']
+            net_liquidation = sum(p.get('market_price', 0) * p.get('position', 0) for p in ib_data['portfolio'])
+            db.upsert_cash_snapshot(
+                total_cash=net_liquidation,
+                total_settled_cash=net_liquidation,
+                currency='USD'
+            )
+            logger.info(f"同步帳戶淨值: ${net_liquidation:,.2f}")
         
         result['success'] = True
         logger.info("Gateway 同步完成")

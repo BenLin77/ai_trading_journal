@@ -1,0 +1,38 @@
+# AI Trading Journal - robots.txt
+# 保護敏感頁面不被搜尋引擎抓取
+
+User-agent: *
+
+# 允許首頁
+Allow: /
+
+# 禁止管理和設定頁面
+Disallow: /settings
+Disallow: /settings/
+Disallow: /api/
+Disallow: /docs
+Disallow: /openapi.json
+
+# 禁止所有內部頁面（這是私人交易日誌系統）
+Disallow: /journal
+Disallow: /journal/
+Disallow: /report
+Disallow: /report/
+Disallow: /strategy
+Disallow: /strategy/
+Disallow: /options
+Disallow: /options/
+Disallow: /ai
+Disallow: /ai/
+Disallow: /lab
+Disallow: /lab/
+Disallow: /review
+Disallow: /review/
+Disallow: /mistakes
+Disallow: /mistakes/
+
+# 禁止 _next 靜態資源
+Disallow: /_next/
+
+# Sitemap（可選，目前不需要）
+# Sitemap: https://journal.gamma-level.cc/sitemap.xml
