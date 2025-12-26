@@ -9,7 +9,7 @@ AI Trading Journal - FastAPI Backend
 import nest_asyncio
 nest_asyncio.apply()
 
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -241,6 +241,27 @@ class SaveConfigRequest(BaseModel):
     telegram_chat_id: Optional[str] = None
     telegram_daily_time: Optional[str] = None  # "HH:MM"
     telegram_enabled: Optional[bool] = None
+
+
+# ========== 認證相關 ==========
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class LoginResponse(BaseModel):
+    success: bool
+    access_token: Optional[str] = None
+    user_id: Optional[str] = None
+    display_name: Optional[str] = None
+    message: str
+
+
+class TokenVerifyResponse(BaseModel):
+    valid: bool
+    user_id: Optional[str] = None
+    display_name: Optional[str] = None
 
 
 # ========== Helper Functions ==========
@@ -526,6 +547,100 @@ async def health_check():
         "ai": "available" if ai_coach else "unavailable",
         "ibkr": "configured" if os.getenv("IBKR_FLEX_TOKEN") else "not_configured"
     }
+
+
+# ========== 認證相關 ==========
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+
+@app.post("/api/auth/login", response_model=LoginResponse)
+async def login(request: LoginRequest):
+    """用戶登入"""
+    from services.auth_service import authenticate_user, create_access_token
+    
+    conn = db._get_connection()
+    try:
+        user = authenticate_user(conn, request.username, request.password)
+        
+        if not user:
+            return LoginResponse(
+                success=False,
+                message="用戶名或密碼錯誤"
+            )
+        
+        token = create_access_token(user)
+        
+        return LoginResponse(
+            success=True,
+            access_token=token,
+            user_id=user['user_id'],
+            display_name=user['display_name'],
+            message="登入成功"
+        )
+    finally:
+        conn.close()
+
+
+@app.post("/api/auth/verify", response_model=TokenVerifyResponse)
+async def verify_token_endpoint(request: Request):
+    """驗證 token"""
+    from services.auth_service import verify_token
+    
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return TokenVerifyResponse(valid=False)
+    
+    token = auth_header.split(" ")[1]
+    payload = verify_token(token)
+    
+    if not payload:
+        return TokenVerifyResponse(valid=False)
+    
+    return TokenVerifyResponse(
+        valid=True,
+        user_id=payload.get("sub"),
+        display_name=payload.get("display_name")
+    )
+
+
+@app.post("/api/auth/logout")
+async def logout():
+    """登出（客戶端清除 token 即可）"""
+    return {"success": True, "message": "登出成功"}
+
+
+@app.post("/api/auth/change-password")
+async def change_password(request: Request, body: ChangePasswordRequest):
+    """修改密碼"""
+    from services.auth_service import verify_token, change_password as do_change_password
+    
+    # 驗證 token
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="未授權")
+    
+    token = auth_header.split(" ")[1]
+    payload = verify_token(token)
+    
+    if not payload:
+        raise HTTPException(status_code=401, detail="Token 無效或已過期")
+    
+    user_id = payload.get("sub")
+    
+    # 修改密碼
+    conn = db._get_connection()
+    try:
+        success, message = do_change_password(conn, user_id, body.old_password, body.new_password)
+    finally:
+        conn.close()
+    
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+    
+    return {"success": True, "message": message}
 
 
 # ========== 交易相關 ==========
@@ -1236,6 +1351,20 @@ async def ai_chat(request: AIAnalysisRequest):
                 symbol_context += f"  - 該標的總盈虧: ${total_pnl:,.2f}"
                 context_parts.append(symbol_context)
         
+        # 4. 讀取最近的每日報告（提供更多分析上下文）
+        try:
+            from services.file_service import FileService
+            file_service = FileService()
+            recent_reports = file_service.get_recent_reports_content(days=3)
+            if recent_reports and len(recent_reports) > 100:
+                # 截取報告內容以避免 token 過多
+                max_report_length = 4000
+                if len(recent_reports) > max_report_length:
+                    recent_reports = recent_reports[:max_report_length] + "\n... (報告內容已截取)"
+                context_parts.append(f"\n📄 最近交易報告摘要:\n{recent_reports}")
+        except Exception as e:
+            logger.debug(f"讀取歷史報告失敗: {e}")
+        
         # 組合完整 context
         full_context = "\n".join(context_parts)
         
@@ -1319,6 +1448,7 @@ async def send_daily_report_job():
     3. 存檔為 Markdown 檔案
     4. 發送到 Telegram
     """
+    logger.info("=== 排程每日報告任務觸發 ===")
     try:
         # 從環境變數或資料庫獲取設定
         enabled = _get_config('TELEGRAM_ENABLED', 'false')
@@ -1424,11 +1554,17 @@ def update_scheduler_job():
         from apscheduler.triggers.cron import CronTrigger
         import pytz
 
-        # 清除舊任務
-        scheduler.remove_all_jobs()
+        # 只清除 daily_report 任務，保留其他任務
+        try:
+            scheduler.remove_job('daily_report')
+            logger.debug("已清除舊的 daily_report 任務")
+        except Exception:
+            pass  # 任務不存在
         
         enabled = db.get_setting('TELEGRAM_ENABLED')
         daily_time = db.get_setting('TELEGRAM_DAILY_TIME')  # "HH:MM"
+        
+        logger.info(f"排程設定: enabled={enabled}, daily_time={daily_time}")
         
         if enabled == 'true' and daily_time:
             try:
@@ -1436,18 +1572,42 @@ def update_scheduler_job():
                 # 設定為台灣時間 (Asia/Taipei)
                 tz = pytz.timezone('Asia/Taipei')
                 
+                # 包裝異步函數為同步函數
+                def sync_daily_report_job():
+                    """同步包裝器，用於 BackgroundScheduler"""
+                    import asyncio
+                    logger.info("=== 排程每日報告任務觸發 (sync wrapper) ===")
+                    try:
+                        # 創建新的事件循環來運行異步任務
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            loop.run_until_complete(send_daily_report_job())
+                        finally:
+                            loop.close()
+                    except Exception as e:
+                        logger.error(f"排程任務執行失敗: {e}")
+                
                 # 只在工作日（週一到週五）發送，週末不發送
                 scheduler.add_job(
-                    send_daily_report_job,
+                    sync_daily_report_job,  # 使用同步包裝器
                     CronTrigger(
                         hour=hour, 
                         minute=minute, 
                         day_of_week='mon-fri',  # 只在工作日執行
                         timezone=tz
                     ),
-                    id='daily_report'
+                    id='daily_report',
+                    replace_existing=True  # 如果存在則替換
                 )
-                logger.info(f"已排程每日報告: {daily_time} (Asia/Taipei, 週一到週五)")
+                
+                # 記錄下一次執行時間
+                job = scheduler.get_job('daily_report')
+                if job:
+                    next_run = job.next_run_time
+                    logger.info(f"已排程每日報告: {daily_time} (Asia/Taipei, 週一到週五)")
+                    logger.info(f"下次執行時間: {next_run}")
+                    
             except ValueError:
                 logger.error(f"時間格式錯誤: {daily_time}")
     except Exception as e:
@@ -1457,31 +1617,47 @@ def update_scheduler_job():
 async def startup_event():
     global scheduler
     try:
-        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+        # 初始化用戶資料表
+        from services.auth_service import init_users_table
+        conn = db._get_connection()
+        try:
+            init_users_table(conn)
+            logger.info("用戶資料表已初始化")
+        finally:
+            conn.close()
+        
+        from apscheduler.schedulers.background import BackgroundScheduler
         from apscheduler.triggers.interval import IntervalTrigger
         
-        scheduler = AsyncIOScheduler()
+        # 使用 BackgroundScheduler，它在獨立的線程中運行，更穩定
+        scheduler = BackgroundScheduler()
         scheduler.start()
-        logger.info("Scheduler 已啟動")
+        logger.info("Scheduler 已啟動 (BackgroundScheduler)")
         update_scheduler_job()
         
         # 添加 Gateway 定期同步任務（GATEWAY 模式下每小時同步一次）
         data_source = _get_data_source()
         if data_source == 'GATEWAY':
-            async def gateway_sync_job():
-                """Gateway 定期同步任務"""
+            def sync_gateway_job():
+                """Gateway 定期同步任務 (同步包裝器)"""
+                import asyncio
                 try:
                     from jobs.gateway_sync import sync_gateway_to_database
-                    result = await sync_gateway_to_database(db)
-                    if result['success']:
-                        logger.info(f"Gateway 定期同步完成: {result.get('positions_synced', 0)} 持倉, {result.get('trades_synced', 0)} 交易")
-                    else:
-                        logger.warning(f"Gateway 定期同步失敗: {result.get('errors', [])}")
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        result = loop.run_until_complete(sync_gateway_to_database(db))
+                        if result['success']:
+                            logger.info(f"Gateway 定期同步完成: {result.get('positions_synced', 0)} 持倉, {result.get('trades_synced', 0)} 交易")
+                        else:
+                            logger.warning(f"Gateway 定期同步失敗: {result.get('errors', [])}")
+                    finally:
+                        loop.close()
                 except Exception as e:
                     logger.error(f"Gateway 定期同步錯誤: {e}")
             
             scheduler.add_job(
-                gateway_sync_job,
+                sync_gateway_job,
                 IntervalTrigger(hours=1),
                 id='gateway_sync',
                 replace_existing=True
@@ -1612,17 +1788,112 @@ async def preview_daily_report():
 
 
 @app.get("/api/reports")
-async def list_reports(limit: int = 30):
-    """列出已存檔的報告"""
+async def list_reports(
+    limit: int = 30, 
+    start_date: Optional[str] = None, 
+    end_date: Optional[str] = None
+):
+    """
+    列出已存檔的報告
+    
+    Args:
+        limit: 最多返回數量
+        start_date: 開始日期 (YYYY-MM-DD)
+        end_date: 結束日期 (YYYY-MM-DD)
+    """
     try:
         from services.file_service import FileService
         
         file_service = FileService()
-        reports = file_service.list_reports(limit=limit)
-        return {"reports": reports}
+        reports = file_service.list_reports(limit=limit, start_date=start_date, end_date=end_date)
+        return {"reports": reports, "total": len(reports)}
     except Exception as e:
         logger.error(f"列出報告失敗: {e}")
-        return {"reports": []}
+        return {"reports": [], "total": 0}
+
+
+@app.get("/api/reports/{filename}")
+async def get_report_content(filename: str):
+    """獲取單一報告內容"""
+    try:
+        from services.file_service import FileService
+        
+        # 安全性檢查：確保檔名不包含路徑遍歷
+        if '..' in filename or '/' in filename or '\\' in filename:
+            raise HTTPException(status_code=400, detail="無效的檔名")
+        
+        file_service = FileService()
+        content = file_service.get_report_content(filename)
+        
+        if content is None:
+            raise HTTPException(status_code=404, detail="報告不存在")
+        
+        return {
+            "filename": filename,
+            "content": content,
+            "date": filename.split('_')[0] if '_' in filename else None
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"獲取報告失敗: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/reports/{filename}/download")
+async def download_report(filename: str):
+    """下載單一報告檔案"""
+    from fastapi.responses import FileResponse
+    from services.file_service import FileService
+    
+    # 安全性檢查
+    if '..' in filename or '/' in filename or '\\' in filename:
+        raise HTTPException(status_code=400, detail="無效的檔名")
+    
+    file_service = FileService()
+    filepath = file_service.reports_dir / filename
+    
+    if not filepath.exists():
+        raise HTTPException(status_code=404, detail="報告不存在")
+    
+    return FileResponse(
+        path=str(filepath),
+        filename=filename,
+        media_type="text/markdown"
+    )
+
+
+@app.get("/api/reports/download/zip")
+async def download_reports_zip(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
+):
+    """
+    打包下載多個報告
+    
+    Args:
+        start_date: 開始日期 (YYYY-MM-DD)
+        end_date: 結束日期 (YYYY-MM-DD)
+    """
+    from fastapi.responses import FileResponse
+    from services.file_service import FileService
+    
+    file_service = FileService()
+    zip_path = file_service.create_reports_zip(start_date=start_date, end_date=end_date)
+    
+    if zip_path is None:
+        raise HTTPException(status_code=404, detail="沒有符合條件的報告")
+    
+    # 構建下載檔名
+    date_range = f"{start_date or 'all'}_to_{end_date or 'now'}"
+    download_filename = f"trading_reports_{date_range}.zip"
+    
+    return FileResponse(
+        path=str(zip_path),
+        filename=download_filename,
+        media_type="application/zip"
+    )
+
 
 
 # ========== 設定 ==========

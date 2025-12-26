@@ -102,18 +102,14 @@ const nextConfig: NextConfig = {
     ],
   },
 
-  // 開發階段的 API 代理（可選）
+  // API 代理（開發和生產環境都使用）
   async rewrites() {
-    // 如果需要在本地開發時代理到後端
-    if (process.env.NODE_ENV === 'development') {
-      return [
-        {
-          source: '/api/:path*',
-          destination: 'http://localhost:8000/api/:path*',
-        },
-      ];
-    }
-    return [];
+    return [
+      {
+        source: '/api/:path*',
+        destination: 'http://127.0.0.1:8000/api/:path*',
+      },
+    ];
   },
 };
 

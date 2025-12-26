@@ -123,12 +123,14 @@ class FileService:
         """
         return self.get_report_path(date_str, prefix).exists()
         
-    def list_reports(self, limit: int = 30) -> list:
+    def list_reports(self, limit: int = 30, start_date: Optional[str] = None, end_date: Optional[str] = None) -> list:
         """
-        列出最近的報告檔案
+        列出報告檔案
         
         Args:
             limit: 最多返回的報告數量
+            start_date: 開始日期 (YYYY-MM-DD)
+            end_date: 結束日期 (YYYY-MM-DD)
             
         Returns:
             list: 報告檔案資訊列表
@@ -136,16 +138,116 @@ class FileService:
         self.ensure_reports_dir()
         
         reports = []
-        for file in sorted(self.reports_dir.glob("*_daily_report.md"), reverse=True)[:limit]:
-            reports.append({
-                'filename': file.name,
-                'path': str(file),
-                'date': file.name.split('_')[0],
-                'size': file.stat().st_size,
-                'modified': datetime.fromtimestamp(file.stat().st_mtime).isoformat()
-            })
+        for file in sorted(self.reports_dir.glob("*_daily_report.md"), reverse=True):
+            try:
+                file_date = file.name.split('_')[0]
+                
+                # 日期範圍篩選
+                if start_date and file_date < start_date:
+                    continue
+                if end_date and file_date > end_date:
+                    continue
+                    
+                reports.append({
+                    'filename': file.name,
+                    'path': str(file),
+                    'date': file_date,
+                    'size': file.stat().st_size,
+                    'modified': datetime.fromtimestamp(file.stat().st_mtime).isoformat()
+                })
+                
+                if len(reports) >= limit:
+                    break
+            except Exception:
+                continue
             
         return reports
+    
+    def get_report_content(self, filename: str) -> Optional[str]:
+        """
+        獲取報告內容
+        
+        Args:
+            filename: 報告檔名
+            
+        Returns:
+            str: 報告內容，找不到檔案時返回 None
+        """
+        filepath = self.reports_dir / filename
+        if not filepath.exists():
+            return None
+            
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return f.read()
+        except Exception as e:
+            logger.error(f"讀取報告失敗: {e}")
+            return None
+    
+    def get_recent_reports_content(self, days: int = 7) -> str:
+        """
+        獲取最近幾天的報告內容（用於 AI 上下文）
+        
+        Args:
+            days: 最近幾天
+            
+        Returns:
+            str: 合併的報告內容
+        """
+        from datetime import timedelta
+        
+        end_date = datetime.now().strftime('%Y-%m-%d')
+        start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+        
+        reports = self.list_reports(limit=days, start_date=start_date, end_date=end_date)
+        
+        if not reports:
+            return ""
+        
+        content_parts = []
+        for report in reports:
+            content = self.get_report_content(report['filename'])
+            if content:
+                content_parts.append(f"\n\n=== {report['date']} 報告 ===\n{content}")
+        
+        return "\n".join(content_parts)
+    
+    def create_reports_zip(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> Optional[Path]:
+        """
+        創建報告 ZIP 壓縮檔
+        
+        Args:
+            start_date: 開始日期
+            end_date: 結束日期
+            
+        Returns:
+            Path: ZIP 檔案路徑
+        """
+        import zipfile
+        import tempfile
+        
+        reports = self.list_reports(limit=1000, start_date=start_date, end_date=end_date)
+        
+        if not reports:
+            return None
+        
+        # 創建臨時 ZIP 檔案
+        date_range = f"{start_date or 'all'}_to_{end_date or 'now'}"
+        zip_filename = f"reports_{date_range}.zip"
+        zip_path = Path(tempfile.gettempdir()) / zip_filename
+        
+        try:
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for report in reports:
+                    filepath = Path(report['path'])
+                    if filepath.exists():
+                        zipf.write(filepath, filepath.name)
+            
+            logger.info(f"已創建報告 ZIP: {zip_path} ({len(reports)} 個檔案)")
+            return zip_path
+        except Exception as e:
+            logger.error(f"創建 ZIP 失敗: {e}")
+            return None
 
 
 def save_report_to_markdown(content: str, date_str: Optional[str] = None) -> Path:

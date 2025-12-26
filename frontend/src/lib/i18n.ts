@@ -13,6 +13,7 @@ export const translations = {
   nav_journal: { zh: '交易日誌', en: 'Journal' },
   nav_strategy: { zh: '策略模擬', en: 'Strategy' },
   nav_report: { zh: '績效成績單', en: 'Report Card' },
+  nav_daily_reports: { zh: '每日報告', en: 'Daily Reports' },
   nav_lab: { zh: '策略回測', en: 'Strategy Lab' },
   nav_options: { zh: '選擇權顧問', en: 'Options Strategy' },
   nav_ai: { zh: 'Portfolio AI', en: 'Portfolio AI' },

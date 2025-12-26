@@ -17,6 +17,7 @@ import {
   Settings,
   ChevronLeft,
   BookOpen,
+  FileText,
 } from 'lucide-react';
 
 const navItems = [
@@ -25,6 +26,7 @@ const navItems = [
   { href: '/journal', icon: BookOpen, labelKey: 'nav_journal' as const },
   { href: '/strategy', icon: Target, labelKey: 'nav_strategy' as const },
   { href: '/report', icon: FileBarChart, labelKey: 'nav_report' as const },
+  { href: '/daily-reports', icon: FileText, labelKey: 'nav_daily_reports' as const },
   { href: '/lab', icon: FlaskConical, labelKey: 'nav_lab' as const },
   { href: '/options', icon: Lightbulb, labelKey: 'nav_options' as const },
   { href: '/ai', icon: Bot, labelKey: 'nav_ai' as const },

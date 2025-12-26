@@ -3,9 +3,7 @@ import { Inter } from "next/font/google";
 import "./globals.css";
 import { QueryProvider } from "@/providers/QueryProvider";
 import { ThemeProvider } from "@/providers/ThemeProvider";
-import { Header } from "@/components/layout/Header";
-import { Sidebar } from "@/components/layout/Sidebar";
-import { AIChat } from "@/components/chat/AIChat";
+import { AuthWrapper } from "@/components/layout/AuthWrapper";
 
 const inter = Inter({
   variable: "--font-inter",
@@ -24,6 +22,11 @@ export const metadata: Metadata = {
       index: false,
       follow: false,
     },
+  },
+  // 網站圖標
+  icons: {
+    icon: '/icon.svg',
+    apple: '/icon.svg',
   },
   // 額外的安全設定
   other: {
@@ -66,14 +69,9 @@ export default function RootLayout({
       <body className={`${inter.variable} font-sans antialiased bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100`} suppressHydrationWarning>
         <QueryProvider>
           <ThemeProvider>
-            <Header />
-            <div className="flex">
-              <Sidebar />
-              <main className="flex-1 ml-64 min-h-[calc(100vh-4rem)] p-6">
-                {children}
-              </main>
-            </div>
-            <AIChat />
+            <AuthWrapper>
+              {children}
+            </AuthWrapper>
           </ThemeProvider>
         </QueryProvider>
       </body>

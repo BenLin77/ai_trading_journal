@@ -9,7 +9,8 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import {
   Loader2, Settings as SettingsIcon, Globe, Moon, Sun, RefreshCw, Trash2,
-  CheckCircle, XCircle, AlertTriangle, Key, Eye, EyeOff, Save, TestTube, Send, Clock
+  CheckCircle, XCircle, AlertTriangle, Key, Eye, EyeOff, Save, TestTube, Send, Clock,
+  Lock, Shield
 } from 'lucide-react';
 
 interface ConfigStatus {
@@ -758,6 +759,9 @@ export default function SettingsPage() {
         </Button>
       </div>
 
+      {/* 帳戶安全 */}
+      <PasswordChangeCard language={language} />
+
       {/* 外觀設定 */}
       <Card>
         <CardHeader>
@@ -897,5 +901,179 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+
+// 修改密碼卡片組件
+function PasswordChangeCard({ language }: { language: 'zh' | 'en' }) {
+  const [oldPassword, setOldPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showOldPassword, setShowOldPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+
+
+  const handleChangePassword = async () => {
+    // 驗證
+    if (!oldPassword || !newPassword || !confirmPassword) {
+      setMessage({ type: 'error', text: language === 'zh' ? '請填寫所有欄位' : 'Please fill all fields' });
+      return;
+    }
+
+    if (newPassword !== confirmPassword) {
+      setMessage({ type: 'error', text: language === 'zh' ? '新密碼與確認密碼不一致' : 'New passwords do not match' });
+      return;
+    }
+
+    if (newPassword.length < 6) {
+      setMessage({ type: 'error', text: language === 'zh' ? '新密碼長度至少 6 個字元' : 'New password must be at least 6 characters' });
+      return;
+    }
+
+    setIsLoading(true);
+    setMessage(null);
+
+    try {
+      const token = localStorage.getItem('auth_token');
+      const res = await fetch(`/api/auth/change-password`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          old_password: oldPassword,
+          new_password: newPassword,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (res.ok && data.success) {
+        setMessage({ type: 'success', text: language === 'zh' ? '密碼修改成功' : 'Password changed successfully' });
+        setOldPassword('');
+        setNewPassword('');
+        setConfirmPassword('');
+      } else {
+        setMessage({ type: 'error', text: data.detail || data.message || (language === 'zh' ? '修改失敗' : 'Failed to change password') });
+      }
+    } catch (err) {
+      setMessage({ type: 'error', text: language === 'zh' ? '網路錯誤' : 'Network error' });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Shield className="h-5 w-5" />
+          {language === 'zh' ? '帳戶安全' : 'Account Security'}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {/* 訊息提示 */}
+        {message && (
+          <div className={cn(
+            'p-3 rounded-lg flex items-center gap-2 text-sm',
+            message.type === 'success'
+              ? 'bg-emerald-50 dark:bg-emerald-900/20 text-emerald-800 dark:text-emerald-200'
+              : 'bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-200'
+          )}>
+            {message.type === 'success' ? <CheckCircle className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
+            {message.text}
+          </div>
+        )}
+
+        {/* 舊密碼 */}
+        <div>
+          <label className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2 block">
+            {language === 'zh' ? '目前密碼' : 'Current Password'}
+          </label>
+          <div className="relative">
+            <input
+              type={showOldPassword ? 'text' : 'password'}
+              value={oldPassword}
+              onChange={(e) => setOldPassword(e.target.value)}
+              placeholder={language === 'zh' ? '請輸入目前密碼' : 'Enter current password'}
+              className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 pr-10"
+            />
+            <button
+              type="button"
+              onClick={() => setShowOldPassword(!showOldPassword)}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
+            >
+              {showOldPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
+        </div>
+
+        {/* 新密碼 */}
+        <div>
+          <label className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2 block">
+            {language === 'zh' ? '新密碼' : 'New Password'}
+          </label>
+          <div className="relative">
+            <input
+              type={showNewPassword ? 'text' : 'password'}
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              placeholder={language === 'zh' ? '請輸入新密碼 (至少 6 個字元)' : 'Enter new password (min 6 characters)'}
+              className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 pr-10"
+            />
+            <button
+              type="button"
+              onClick={() => setShowNewPassword(!showNewPassword)}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
+            >
+              {showNewPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
+        </div>
+
+        {/* 確認新密碼 */}
+        <div>
+          <label className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2 block">
+            {language === 'zh' ? '確認新密碼' : 'Confirm New Password'}
+          </label>
+          <div className="relative">
+            <input
+              type={showConfirmPassword ? 'text' : 'password'}
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              placeholder={language === 'zh' ? '再次輸入新密碼' : 'Re-enter new password'}
+              className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 pr-10"
+            />
+            <button
+              type="button"
+              onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700"
+            >
+              {showConfirmPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
+        </div>
+
+        {/* 修改按鈕 */}
+        <Button
+          onClick={handleChangePassword}
+          disabled={isLoading || !oldPassword || !newPassword || !confirmPassword}
+          className="w-full"
+        >
+          {isLoading ? (
+            <Loader2 className="h-4 w-4 animate-spin mr-2" />
+          ) : (
+            <Lock className="h-4 w-4 mr-2" />
+          )}
+          {language === 'zh' ? '修改密碼' : 'Change Password'}
+        </Button>
+      </CardContent>
+    </Card>
   );
 }
